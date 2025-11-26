@@ -7,7 +7,7 @@ display_name: Register Model
 description: Registers a trained model to the Azure ML workspace
 
 code: ./code
-environment: azureml:aml-register-cli:0.2.0
+environment: azureml:aml-register-cli:0.3.0
 
 command: >-
   python register.py

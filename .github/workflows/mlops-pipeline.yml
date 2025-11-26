@@ -173,11 +173,11 @@ jobs:
             az ml environment create -f environment/training.yaml || echo "⚠️ May already exist"
           fi
 
-          # Register environment - version 0.2.0 with REST API dependencies
-          if az ml environment show --name aml-register-cli --version 0.2.0 &>/dev/null 2>&1; then
-            echo "✅ Register environment v0.2.0 exists"
+          # Register environment - version 0.3.0 with Azure CLI base image
+          if az ml environment show --name aml-register-cli --version 0.3.0 &>/dev/null 2>&1; then
+            echo "✅ Register environment v0.3.0 exists"
           else
-            echo "🔨 Creating register environment v0.2.0..."
+            echo "🔨 Creating register environment v0.3.0..."
             az ml environment create -f components/register/environment.yaml || echo "⚠️ May already exist"
           fi
 

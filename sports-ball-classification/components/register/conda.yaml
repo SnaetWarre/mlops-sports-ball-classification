@@ -4,6 +4,3 @@ channels:
 dependencies:
   - python=3.10
   - pip=24.0
-  - pip:
-      - azure-identity>=1.14.0
-      - requests>=2.31.0
