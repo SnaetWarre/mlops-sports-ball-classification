@@ -1,0 +1,541 @@
+name: 🏀 MLOps Sports Ball Classification
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "full-pipeline"
+        type: choice
+        options:
+          - full-pipeline
+          - train-only
+          - download-model
+          - deploy-inference
+          - cleanup
+      epochs:
+        description: "Number of training epochs"
+        required: false
+        default: "10"
+        type: string
+      wait_for_completion:
+        description: "Wait for training to complete before downloading model"
+        required: false
+        default: true
+        type: boolean
+
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "sports-ball-classification/**"
+      - "data/**"
+
+env:
+  RESOURCE_GROUP: mlops-sports-ball-rg
+  WORKSPACE_NAME: mlops-sports-ball-ws
+  LOCATION: westeurope
+  COMPUTE_CLUSTER_NAME: sports-ball-cluster
+  MODEL_NAME: sports-ball-cnn
+
+jobs:
+  # ============================================================================
+  # Stage 1: Azure Infrastructure Setup
+  # ============================================================================
+  setup-azure:
+    name: 🏗️ Setup Azure Infrastructure
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'full-pipeline' || github.event.inputs.action == 'train-only' || github.event.inputs.action == '' }}
+
+    outputs:
+      infrastructure_ready: ${{ steps.verify.outputs.ready }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Azure ML CLI extension
+        run: |
+          az extension add -n ml -y
+          az extension update -n ml
+
+      - name: Create/Verify Resource Group
+        run: |
+          echo "🔍 Checking resource group..."
+          if az group show --name ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "✅ Resource group '${{ env.RESOURCE_GROUP }}' exists"
+          else
+            echo "🔨 Creating resource group..."
+            az group create --name ${{ env.RESOURCE_GROUP }} --location ${{ env.LOCATION }}
+            echo "✅ Resource group created"
+          fi
+
+      - name: Create/Verify Azure ML Workspace
+        run: |
+          echo "🔍 Checking workspace..."
+          if az ml workspace show --name ${{ env.WORKSPACE_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "✅ Workspace '${{ env.WORKSPACE_NAME }}' exists"
+          else
+            echo "🔨 Creating workspace (this takes a few minutes)..."
+            az ml workspace create \
+              --name ${{ env.WORKSPACE_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --location ${{ env.LOCATION }}
+            echo "✅ Workspace created"
+          fi
+
+      - name: Set Azure ML defaults
+        run: |
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      - name: Create/Verify Compute Cluster
+        working-directory: sports-ball-classification
+        run: |
+          echo "🔍 Checking compute cluster..."
+          if az ml compute show --name ${{ env.COMPUTE_CLUSTER_NAME }} &>/dev/null; then
+            echo "✅ Compute cluster '${{ env.COMPUTE_CLUSTER_NAME }}' exists"
+          else
+            echo "🔨 Creating compute cluster..."
+            az ml compute create -f environment/compute-cluster.yaml
+            echo "✅ Compute cluster created"
+          fi
+
+      - name: Create/Verify Environments
+        working-directory: sports-ball-classification
+        run: |
+          echo "🌍 Setting up ML environments..."
+
+          # Preprocessing environment
+          if az ml environment show --name aml-preprocessing-cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Preprocessing environment exists"
+          else
+            echo "🔨 Creating preprocessing environment..."
+            az ml environment create -f environment/preprocessing.yaml
+          fi
+
+          # Training environment
+          if az ml environment show --name aml-training-cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Training environment exists"
+          else
+            echo "🔨 Creating training environment..."
+            az ml environment create -f environment/training.yaml
+          fi
+
+          # Register environment
+          if az ml environment show --name aml-register-cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Register environment exists"
+          else
+            echo "🔨 Creating register environment..."
+            az ml environment create -f components/register/environment.yaml
+          fi
+
+          echo "✅ All environments ready"
+
+      - name: Register ML Components
+        working-directory: sports-ball-classification
+        run: |
+          echo "🧩 Registering ML components..."
+
+          # Data prep component
+          if az ml component show --name data_prep_image_resize_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Dataprep component exists"
+          else
+            az ml component create -f components/dataprep/dataprep.yaml
+          fi
+
+          # Data split component
+          if az ml component show --name data_split_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Data split component exists"
+          else
+            az ml component create -f components/dataprep/data_split.yaml
+          fi
+
+          # Training component
+          if az ml component show --name training_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Training component exists"
+          else
+            az ml component create -f components/training/training.yaml
+          fi
+
+          # Register component
+          if az ml component show --name register_model_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Register component exists"
+          else
+            az ml component create -f components/register/register.yaml
+          fi
+
+          echo "✅ All components registered"
+
+      - name: Upload Training Datasets
+        run: |
+          echo "📁 Uploading datasets to Azure ML..."
+
+          BALL_TYPES=(
+            "american_football" "baseball" "basketball" "billiard_ball"
+            "bowling_ball" "cricket_ball" "football" "golf_ball"
+            "hockey_ball" "hockey_puck" "rugby_ball" "shuttlecock"
+            "table_tennis_ball" "tennis_ball" "volleyball"
+          )
+
+          for ball in "${BALL_TYPES[@]}"; do
+            if az ml data show --name "$ball" --version 1 &>/dev/null; then
+              echo "✅ '$ball' exists"
+            else
+              if [ -d "data/$ball" ]; then
+                echo "🔨 Uploading '$ball'..."
+                az ml data create --name "$ball" --version 1 --path "data/$ball" --type uri_folder
+              fi
+            fi
+          done
+
+          echo "✅ All datasets uploaded"
+
+      - name: Verify Infrastructure
+        id: verify
+        run: |
+          echo "🔍 Verifying infrastructure..."
+          echo "ready=true" >> $GITHUB_OUTPUT
+          echo "✅ Azure infrastructure is ready!"
+
+  # ============================================================================
+  # Stage 2: Run Training Pipeline
+  # ============================================================================
+  train-model:
+    name: 🚀 Train Model on Azure ML
+    runs-on: ubuntu-latest
+    needs: setup-azure
+    if: ${{ (github.event.inputs.action == 'full-pipeline' || github.event.inputs.action == 'train-only' || github.event.inputs.action == '') && needs.setup-azure.outputs.infrastructure_ready == 'true' }}
+
+    outputs:
+      job_name: ${{ steps.submit.outputs.job_name }}
+      training_completed: ${{ steps.wait.outputs.completed }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Azure ML CLI
+        run: |
+          az extension add -n ml -y
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      - name: Submit Training Pipeline
+        id: submit
+        working-directory: sports-ball-classification
+        run: |
+          echo "🚀 Submitting training pipeline..."
+
+          JOB_NAME=$(az ml job create \
+            -f pipelines/sports-ball-classification.yaml \
+            --set inputs.epochs=${{ github.event.inputs.epochs || '10' }} \
+            --query name -o tsv)
+
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║           🚀 Training Pipeline Submitted!                   ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Job Name: $JOB_NAME"
+          echo "Epochs: ${{ github.event.inputs.epochs || '10' }}"
+
+      - name: Wait for Training Completion
+        id: wait
+        if: ${{ github.event.inputs.wait_for_completion == 'true' || github.event.inputs.wait_for_completion == '' }}
+        run: |
+          echo "⏳ Waiting for training to complete..."
+          echo "   This may take 15-30 minutes depending on dataset size and epochs."
+          echo ""
+
+          JOB_NAME="${{ steps.submit.outputs.job_name }}"
+
+          # Stream logs and wait for completion
+          az ml job stream --name $JOB_NAME || true
+
+          # Check final status
+          STATUS=$(az ml job show --name $JOB_NAME --query status -o tsv)
+          echo ""
+          echo "Final Status: $STATUS"
+
+          if [ "$STATUS" == "Completed" ]; then
+            echo "completed=true" >> $GITHUB_OUTPUT
+            echo "✅ Training completed successfully!"
+          else
+            echo "completed=false" >> $GITHUB_OUTPUT
+            echo "❌ Training status: $STATUS"
+            exit 1
+          fi
+
+  # ============================================================================
+  # Stage 3: Download Model to Local Machine
+  # ============================================================================
+  download-model:
+    name: 📥 Download Trained Model
+    runs-on: self-hosted
+    needs: train-model
+    if: |
+      always() &&
+      (github.event.inputs.action == 'full-pipeline' || github.event.inputs.action == 'download-model' || github.event.inputs.action == '') &&
+      (needs.train-model.outputs.training_completed == 'true' || github.event.inputs.action == 'download-model')
+
+    outputs:
+      model_downloaded: ${{ steps.download.outputs.success }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Display Runner Info
+        run: |
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║           📥 Downloading Model to Local Machine             ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "🖥️  Host: $(hostname)"
+          echo "📁 Working directory: $(pwd)"
+
+      - name: Azure Login (CLI)
+        run: |
+          echo "🔐 Logging into Azure..."
+          # Parse credentials from secret
+          echo '${{ secrets.AZURE_CREDENTIALS }}' > /tmp/azure_creds.json
+
+          CLIENT_ID=$(cat /tmp/azure_creds.json | python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])")
+          CLIENT_SECRET=$(cat /tmp/azure_creds.json | python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])")
+          TENANT_ID=$(cat /tmp/azure_creds.json | python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])")
+
+          az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID"
+          rm /tmp/azure_creds.json
+
+          az extension add -n ml -y 2>/dev/null || true
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+          echo "✅ Logged in successfully"
+
+      - name: Get Latest Model Version
+        id: get-model
+        run: |
+          echo "🔍 Finding latest model version..."
+
+          # Get the latest version of the model
+          MODEL_VERSION=$(az ml model list --name ${{ env.MODEL_NAME }} --query "[0].version" -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$MODEL_VERSION" ]; then
+            echo "⚠️ No model found with name '${{ env.MODEL_NAME }}'"
+            echo "   Make sure training has completed successfully."
+            exit 1
+          fi
+
+          echo "model_version=$MODEL_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Found model version: $MODEL_VERSION"
+
+      - name: Download Model
+        id: download
+        run: |
+          echo "📥 Downloading model..."
+
+          MODEL_VERSION="${{ steps.get-model.outputs.model_version }}"
+          MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
+
+          # Create model directory
+          mkdir -p "$MODEL_DIR"
+
+          # Download the model
+          az ml model download \
+            --name ${{ env.MODEL_NAME }} \
+            --version $MODEL_VERSION \
+            --download-path "$MODEL_DIR"
+
+          echo ""
+          echo "📁 Downloaded model contents:"
+          ls -la "$MODEL_DIR"
+          find "$MODEL_DIR" -type f
+
+          # Move model files to expected location if nested
+          if [ -d "$MODEL_DIR/${{ env.MODEL_NAME }}" ]; then
+            mv "$MODEL_DIR/${{ env.MODEL_NAME }}"/* "$MODEL_DIR/" 2>/dev/null || true
+            rmdir "$MODEL_DIR/${{ env.MODEL_NAME }}" 2>/dev/null || true
+          fi
+
+          echo ""
+          echo "success=true" >> $GITHUB_OUTPUT
+          echo "✅ Model downloaded to $MODEL_DIR"
+
+      - name: Verify Model Files
+        run: |
+          MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
+
+          echo "🔍 Verifying model files..."
+
+          if [ -f "$MODEL_DIR/model.keras" ] || [ -f "$MODEL_DIR/saved_model.pb" ] || [ -d "$MODEL_DIR/variables" ]; then
+            echo "✅ Model files verified!"
+            ls -la "$MODEL_DIR"
+          else
+            echo "📁 Model directory contents:"
+            find "$MODEL_DIR" -type f 2>/dev/null || echo "No files found"
+            echo ""
+            echo "⚠️ Expected model format not found, but files may still be usable"
+          fi
+
+  # ============================================================================
+  # Stage 4: Deploy Inference API (Self-Hosted Runner)
+  # ============================================================================
+  deploy-inference:
+    name: 🐳 Deploy Inference API
+    runs-on: self-hosted
+    needs: download-model
+    if: |
+      always() &&
+      (github.event.inputs.action == 'full-pipeline' || github.event.inputs.action == 'deploy-inference' || github.event.inputs.action == '') &&
+      (needs.download-model.outputs.model_downloaded == 'true' || github.event.inputs.action == 'deploy-inference')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Display Deployment Info
+        run: |
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║        🐳 Deploying Sports Ball Classification API         ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "🖥️  Host: $(hostname)"
+          echo "📁 Working directory: $(pwd)"
+
+      - name: Stop Existing Containers
+        working-directory: sports-ball-classification/inference
+        run: |
+          echo "🛑 Stopping existing containers..."
+          docker-compose down 2>/dev/null || true
+          echo "✅ Containers stopped"
+
+      - name: Build Docker Images
+        working-directory: sports-ball-classification/inference
+        run: |
+          echo "🔨 Building Docker images..."
+          docker-compose build
+          echo "✅ Build complete"
+
+      - name: Start Containers
+        working-directory: sports-ball-classification/inference
+        run: |
+          echo "🚀 Starting containers..."
+          docker-compose up -d
+          echo "✅ Containers started"
+
+      - name: Wait for Services
+        run: |
+          echo "⏳ Waiting for services to start..."
+          sleep 15
+
+      - name: Health Check
+        run: |
+          echo "🏥 Running health check..."
+          for i in {1..12}; do
+            if curl -s http://localhost:8000/health | grep -q "healthy"; then
+              echo "✅ API is healthy!"
+              break
+            fi
+            echo "   Waiting for API... (attempt $i/12)"
+            sleep 5
+          done
+
+      - name: Test Prediction
+        run: |
+          echo "🧪 Testing prediction endpoint..."
+
+          SAMPLE_IMAGE=$(find data -name "*.jpg" 2>/dev/null | head -1)
+          if [ -n "$SAMPLE_IMAGE" ]; then
+            echo "   Using sample image: $SAMPLE_IMAGE"
+            RESULT=$(curl -s -X POST "http://localhost:8000/predict" \
+              -H "accept: application/json" \
+              -H "Content-Type: multipart/form-data" \
+              -F "img=@$SAMPLE_IMAGE")
+            echo "   Result: $RESULT"
+          fi
+
+      - name: Deployment Summary
+        working-directory: sports-ball-classification/inference
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║           🎉 Deployment Complete!                           ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "📡 API Endpoints:"
+          echo "   • Swagger UI: http://localhost:8000/docs"
+          echo "   • Health:     http://localhost:8000/health"
+          echo "   • Predict:    http://localhost:8000/predict"
+          echo "   • Categories: http://localhost:8000/categories"
+          echo "   • Stats:      http://localhost:8000/stats"
+          echo ""
+          echo "📊 Container status:"
+          docker-compose ps
+
+  # ============================================================================
+  # Cleanup Azure Resources
+  # ============================================================================
+  cleanup:
+    name: 🗑️ Cleanup Azure Resources
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'cleanup' }}
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Delete Resource Group
+        run: |
+          echo "🗑️ Deleting resource group '${{ env.RESOURCE_GROUP }}'..."
+          echo "⚠️ This will delete ALL resources in the group!"
+
+          az group delete --name ${{ env.RESOURCE_GROUP }} --yes --no-wait
+
+          echo "✅ Deletion initiated (running in background)"
+
+  # ============================================================================
+  # Pipeline Summary
+  # ============================================================================
+  summary:
+    name: 📋 Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [setup-azure, train-model, download-model, deploy-inference]
+    if: always() && github.event.inputs.action != 'cleanup'
+
+    steps:
+      - name: Print Summary
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║     🏀 Sports Ball Classification - Pipeline Summary 🏀     ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "📊 Stage Results:"
+          echo "   1️⃣  Azure Setup:     ${{ needs.setup-azure.result || 'skipped' }}"
+          echo "   2️⃣  Model Training:  ${{ needs.train-model.result || 'skipped' }}"
+          echo "   3️⃣  Model Download:  ${{ needs.download-model.result || 'skipped' }}"
+          echo "   4️⃣  API Deployment:  ${{ needs.deploy-inference.result || 'skipped' }}"
+          echo ""
+
+          if [ "${{ needs.train-model.outputs.job_name }}" != "" ]; then
+            echo "🔬 Training Job: ${{ needs.train-model.outputs.job_name }}"
+            echo ""
+          fi
+
+          echo "🔗 Azure ML Studio: https://ml.azure.com"
+          echo "📡 Local API: http://localhost:8000/docs"
+          echo ""
