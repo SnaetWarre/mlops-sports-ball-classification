@@ -6,4 +6,3 @@ dependencies:
   - pip=24.0
   - pip:
       - azure-cli>=2.50.0
-      - azure-cli-ml>=1.0.0
