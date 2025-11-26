@@ -1,0 +1,236 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+
+type: pipeline
+name: sports-ball-classification-cli
+display_name: Sports Ball Classification
+experiment_name: sports-ball-classification
+
+inputs:
+  train_test_split_percentage: 20
+  epochs: 10
+
+outputs:
+  registration_details:
+    mode: upload
+  output_model:
+    mode: upload
+    type: uri_folder
+
+settings:
+  default_compute: azureml:sports-ball-cluster
+
+jobs:
+  # Data preparation - resize images for each ball category
+  data_prep_american_football:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:american_football:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_baseball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:baseball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_basketball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:basketball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_billiard_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:billiard_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_bowling_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:bowling_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_cricket_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:cricket_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_football:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:football:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_golf_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:golf_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_hockey_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:hockey_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_hockey_puck:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:hockey_puck:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_rugby_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:rugby_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_shuttlecock:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:shuttlecock:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_table_tennis_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:table_tennis_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_tennis_ball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:tennis_ball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  data_prep_volleyball:
+    type: command
+    component: azureml:data_prep_image_resize_cli@latest
+    inputs:
+      data:
+        type: uri_folder
+        path: azureml:volleyball:1
+    outputs:
+      output_data:
+        mode: rw_mount
+
+  # Split data into training and testing sets
+  data_split:
+    type: command
+    component: azureml:data_split_cli@latest
+    inputs:
+      ball_1: ${{parent.jobs.data_prep_american_football.outputs.output_data}}
+      ball_2: ${{parent.jobs.data_prep_baseball.outputs.output_data}}
+      ball_3: ${{parent.jobs.data_prep_basketball.outputs.output_data}}
+      ball_4: ${{parent.jobs.data_prep_billiard_ball.outputs.output_data}}
+      ball_5: ${{parent.jobs.data_prep_bowling_ball.outputs.output_data}}
+      ball_6: ${{parent.jobs.data_prep_cricket_ball.outputs.output_data}}
+      ball_7: ${{parent.jobs.data_prep_football.outputs.output_data}}
+      ball_8: ${{parent.jobs.data_prep_golf_ball.outputs.output_data}}
+      ball_9: ${{parent.jobs.data_prep_hockey_ball.outputs.output_data}}
+      ball_10: ${{parent.jobs.data_prep_hockey_puck.outputs.output_data}}
+      ball_11: ${{parent.jobs.data_prep_rugby_ball.outputs.output_data}}
+      ball_12: ${{parent.jobs.data_prep_shuttlecock.outputs.output_data}}
+      ball_13: ${{parent.jobs.data_prep_table_tennis_ball.outputs.output_data}}
+      ball_14: ${{parent.jobs.data_prep_tennis_ball.outputs.output_data}}
+      ball_15: ${{parent.jobs.data_prep_volleyball.outputs.output_data}}
+      train_test_split_factor: ${{parent.inputs.train_test_split_percentage}}
+    outputs:
+      testing_data:
+        mode: rw_mount
+      training_data:
+        mode: rw_mount
+
+  # Train the CNN model
+  training:
+    type: command
+    component: azureml:training_cli@latest
+    inputs:
+      training_folder: ${{parent.jobs.data_split.outputs.training_data}}
+      testing_folder: ${{parent.jobs.data_split.outputs.testing_data}}
+      epochs: ${{parent.inputs.epochs}}
+    outputs:
+      output_model: ${{parent.outputs.output_model}}
+
+  # Register the trained model
+  register:
+    type: command
+    component: azureml:register_model_cli@latest
+    inputs:
+      model_name: sports-ball-classification
+      model_type: custom_model
+      model_path: ${{parent.jobs.training.outputs.output_model}}
+    outputs:
+      registration_details: ${{parent.outputs.registration_details}}

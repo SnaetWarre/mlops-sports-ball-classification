@@ -1,0 +1,95 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+
+name: data_split_cli
+version: 1.0.0
+description: Data splitting component that partitions multiple sports ball image datasets into balanced training and testing sets with configurable split ratios
+display_name: Sports Ball Train-Test Data Splitter
+is_deterministic: true
+type: command
+
+code: ./code
+command: 'python traintestsplit.py
+  --datasets ${{inputs.ball_1}} ${{inputs.ball_2}} ${{inputs.ball_3}} ${{inputs.ball_4}} ${{inputs.ball_5}} ${{inputs.ball_6}} ${{inputs.ball_7}} ${{inputs.ball_8}} ${{inputs.ball_9}} ${{inputs.ball_10}} ${{inputs.ball_11}} ${{inputs.ball_12}} ${{inputs.ball_13}} ${{inputs.ball_14}} ${{inputs.ball_15}}
+  --split_size ${{inputs.train_test_split_factor}}
+  --training_data_output ${{outputs.training_data}}
+  --testing_data_output ${{outputs.testing_data}}
+  '
+
+inputs:
+  ball_1:
+    optional: false
+    type: uri_folder
+    description: american_football dataset
+  ball_2:
+    optional: false
+    type: uri_folder
+    description: baseball dataset
+  ball_3:
+    optional: false
+    type: uri_folder
+    description: basketball dataset
+  ball_4:
+    optional: false
+    type: uri_folder
+    description: billiard_ball dataset
+  ball_5:
+    optional: false
+    type: uri_folder
+    description: bowling_ball dataset
+  ball_6:
+    optional: false
+    type: uri_folder
+    description: cricket_ball dataset
+  ball_7:
+    optional: false
+    type: uri_folder
+    description: football dataset
+  ball_8:
+    optional: false
+    type: uri_folder
+    description: golf_ball dataset
+  ball_9:
+    optional: false
+    type: uri_folder
+    description: hockey_ball dataset
+  ball_10:
+    optional: false
+    type: uri_folder
+    description: hockey_puck dataset
+  ball_11:
+    optional: false
+    type: uri_folder
+    description: rugby_ball dataset
+  ball_12:
+    optional: false
+    type: uri_folder
+    description: shuttlecock dataset
+  ball_13:
+    optional: false
+    type: uri_folder
+    description: table_tennis_ball dataset
+  ball_14:
+    optional: false
+    type: uri_folder
+    description: tennis_ball dataset
+  ball_15:
+    optional: false
+    type: uri_folder
+    description: volleyball dataset
+  train_test_split_factor:
+    optional: false
+    type: number
+    description: Percentage of data to use for testing (e.g., 20 for 20% test)
+
+outputs:
+  testing_data:
+    type: uri_folder
+    description: Output folder containing testing images
+  training_data:
+    type: uri_folder
+    description: Output folder containing training images
+
+resources:
+  instance_count: 1
+
+environment: azureml:aml-preprocessing-cli:0.1.0

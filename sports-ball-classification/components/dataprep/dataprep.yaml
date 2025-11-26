@@ -1,0 +1,23 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+
+name: data_prep_image_resize_cli
+version: 1.0.0
+display_name: Image Preprocessing & Resizing Pipeline
+is_deterministic: True
+type: command
+description: Custom image preprocessing component that reads image datasets and standardizes them to 64x64 pixel dimensions for ML training workflows.
+
+environment: azureml:aml-preprocessing-cli:0.1.0
+resources:
+  instance_count: 1
+
+code: ./code
+command: 'python dataprep.py --data ${{inputs.data}} --output_data ${{outputs.output_data}}'
+
+inputs:
+  data:
+    type: uri_folder
+    optional: False
+outputs:
+  output_data:
+    type: uri_folder

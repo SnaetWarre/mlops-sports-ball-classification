@@ -1,0 +1,10 @@
+name: aml-register-cli
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip=24.0
+  - pip:
+    - azure-ai-ml>=1.12.0
+    - azure-identity>=1.14.0
+    - azureml-core>=1.55.0

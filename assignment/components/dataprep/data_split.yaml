@@ -1,0 +1,41 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+
+name: data_split_cli
+version: 1.0.0
+description: Advanced data splitting component that intelligently partitions multiple animal image datasets into balanced training and testing sets with configurable split ratios
+display_name: Smart Train-Test Data Splitter
+is_deterministic: true
+type: command
+
+code: ./code
+command: 'python traintestsplit.py
+  --datasets ${{inputs.animal_1}} ${{inputs.animal_2}} ${{inputs.animal_3}}
+  --split_size ${{inputs.train_test_split_factor}}
+  --training_data_output ${{outputs.training_data}} --testing_data_output ${{outputs.testing_data}}
+  '
+
+inputs:
+  animal_1:
+    optional: false
+    type: uri_folder
+  animal_2:
+    optional: false
+    type: uri_folder
+  animal_3:
+    optional: false
+    type: uri_folder
+  train_test_split_factor:
+    optional: false
+    type: number
+
+
+outputs:
+  testing_data:
+    type: uri_folder
+  training_data:
+    type: uri_folder
+
+resources:
+  instance_count: 1
+
+environment: azureml:aml-preprocessing-cli:0.1.0

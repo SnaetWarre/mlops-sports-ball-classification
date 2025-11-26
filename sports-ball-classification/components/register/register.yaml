@@ -1,0 +1,34 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+
+name: register_model_cli
+version: 0.1.0
+type: command
+display_name: Register Model
+description: Registers a trained model to the Azure ML workspace
+
+code: ./code
+environment: azureml:aml-register-cli:0.1.0
+
+command: >-
+  python register.py
+  --model_name ${{inputs.model_name}}
+  --model_path ${{inputs.model_path}}
+  --model_type ${{inputs.model_type}}
+  --registration_details ${{outputs.registration_details}}
+
+inputs:
+  model_name:
+    type: string
+    description: Name for the registered model
+  model_path:
+    type: uri_folder
+    description: Path to the model folder
+  model_type:
+    type: string
+    default: custom_model
+    description: Type of model (custom_model, mlflow_model, triton_model)
+
+outputs:
+  registration_details:
+    type: uri_folder
+    description: Output folder containing registration details

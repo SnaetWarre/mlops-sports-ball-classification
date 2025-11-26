@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animal-classification-deployment
+  labels:
+    app: animal-classification
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: animal-classification
+  template:
+    metadata:
+      labels:
+        app: animal-classification
+    spec:
+      containers:
+        - name: animal-classification
+          image: ghcr.io/snaetwarre/mlops-animals-api:master
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_PATH
+              value: /app/model/animal-classification/INPUT_model_path/animal-cnn/model.keras
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: animal-classification-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: animal-classification
+  ports:
+    - port: 80
+      targetPort: 8000

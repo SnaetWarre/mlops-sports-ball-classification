@@ -1,0 +1,28 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+version: 0.1.2
+type: command
+name: training_cli
+display_name: Training a model
+description: Trains an AI model 
+
+code: ./code
+environment: azureml:aml-training-cli:0.1.0
+command: 'python train.py
+  --training_folder ${{inputs.training_folder}} --testing_folder ${{inputs.testing_folder}}
+  --output_folder ${{outputs.output_model}}
+  --epochs ${{inputs.epochs}}
+  '
+
+inputs:
+  epochs:
+    optional: false
+    type: number
+  testing_folder:
+    optional: false
+    type: uri_folder
+  training_folder:
+    optional: false
+    type: uri_folder
+outputs:
+  output_model:
+    type: uri_folder

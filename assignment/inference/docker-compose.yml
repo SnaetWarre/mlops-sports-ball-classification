@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+    environment:
+      - PORT=8000
+      - MODEL_PATH=/app/animal-classification/INPUT_model_path/animal-cnn/model.keras
+      # Hugging Face fallback (set when no local model is mounted)
+      # Required: your model repo on HF, e.g. "your-username/masterclass-2025"
+      - HF_REPO_ID=
+      # Optional: model file name and revision (tag/branch/commit)
+      - HF_MODEL_FILENAME=model.keras
+      - HF_REVISION=main
+    restart: unless-stopped

@@ -1,0 +1,431 @@
+name: Azure ML Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "full-pipeline"
+        type: choice
+        options:
+          - full-pipeline
+          - setup-only
+          - train-only
+          - cleanup
+      epochs:
+        description: "Number of training epochs"
+        required: false
+        default: "10"
+        type: string
+      wait_for_completion:
+        description: "Wait for training to complete"
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "examen/sports-ball-classification/components/**"
+      - "examen/sports-ball-classification/pipelines/**"
+      - "examen/sports-ball-classification/environment/**"
+      - "examen/data/**"
+
+env:
+  RESOURCE_GROUP: mlops-sports-ball-rg
+  WORKSPACE_NAME: mlops-sports-ball-ws
+  LOCATION: westeurope
+  COMPUTE_CLUSTER_NAME: sports-ball-cluster
+
+jobs:
+  # ============================================================================
+  # Job 1: Azure Infrastructure Setup
+  # ============================================================================
+  setup-infrastructure:
+    name: 🏗️ Setup Azure Infrastructure
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'train-only' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Azure ML CLI extension
+        run: |
+          az extension add -n ml -y
+          az extension update -n ml
+
+      # --- Resource Group ---
+      - name: Create Resource Group (if not exists)
+        run: |
+          if az group show --name ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "✅ Resource group '${{ env.RESOURCE_GROUP }}' already exists"
+          else
+            echo "🔨 Creating resource group..."
+            az group create --name ${{ env.RESOURCE_GROUP }} --location ${{ env.LOCATION }}
+            echo "✅ Resource group created"
+          fi
+
+      # --- Workspace ---
+      - name: Create Azure ML Workspace (if not exists)
+        run: |
+          if az ml workspace show --name ${{ env.WORKSPACE_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "✅ Workspace '${{ env.WORKSPACE_NAME }}' already exists"
+          else
+            echo "🔨 Creating workspace (this takes a few minutes)..."
+            az ml workspace create \
+              --name ${{ env.WORKSPACE_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --location ${{ env.LOCATION }}
+            echo "✅ Workspace created"
+          fi
+
+      - name: Set Azure ML defaults
+        run: |
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      # --- Compute Cluster ---
+      - name: Create Compute Cluster (if not exists)
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml compute show --name ${{ env.COMPUTE_CLUSTER_NAME }} &>/dev/null; then
+            echo "✅ Compute cluster '${{ env.COMPUTE_CLUSTER_NAME }}' already exists"
+          else
+            echo "🔨 Creating compute cluster..."
+            az ml compute create -f environment/compute-cluster.yaml
+            echo "✅ Compute cluster created"
+          fi
+
+  # ============================================================================
+  # Job 2: Create Environments
+  # ============================================================================
+  setup-environments:
+    name: 🌍 Setup Environments
+    runs-on: ubuntu-latest
+    needs: setup-infrastructure
+    if: ${{ github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'train-only' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Azure ML CLI
+        run: |
+          az extension add -n ml -y
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      - name: Create Preprocessing Environment
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml environment show --name aml-preprocessing-cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Environment 'aml-preprocessing-cli' already exists"
+          else
+            echo "🔨 Creating preprocessing environment..."
+            az ml environment create -f environment/preprocessing.yaml
+            echo "✅ Created"
+          fi
+
+      - name: Create Training Environment
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml environment show --name aml-training-cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Environment 'aml-training-cli' already exists"
+          else
+            echo "🔨 Creating training environment..."
+            az ml environment create -f environment/training.yaml
+            echo "✅ Created"
+          fi
+
+      - name: Create Register Environment
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml environment show --name aml-register-cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Environment 'aml-register-cli' already exists"
+          else
+            echo "🔨 Creating register environment..."
+            az ml environment create -f components/register/environment.yaml
+            echo "✅ Created"
+          fi
+
+  # ============================================================================
+  # Job 3: Register Components
+  # ============================================================================
+  setup-components:
+    name: 🧩 Register Components
+    runs-on: ubuntu-latest
+    needs: setup-environments
+    if: ${{ github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'train-only' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Azure ML CLI
+        run: |
+          az extension add -n ml -y
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      - name: Register Dataprep Component
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml component show --name data_prep_image_resize_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Component 'data_prep_image_resize_cli' already exists"
+          else
+            echo "🔨 Registering dataprep component..."
+            az ml component create -f components/dataprep/dataprep.yaml
+            echo "✅ Registered"
+          fi
+
+      - name: Register Data Split Component
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml component show --name data_split_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Component 'data_split_cli' already exists"
+          else
+            echo "🔨 Registering data split component..."
+            az ml component create -f components/dataprep/data_split.yaml
+            echo "✅ Registered"
+          fi
+
+      - name: Register Training Component
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml component show --name training_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Component 'training_cli' already exists"
+          else
+            echo "🔨 Registering training component..."
+            az ml component create -f components/training/training.yaml
+            echo "✅ Registered"
+          fi
+
+      - name: Register Model Registration Component
+        working-directory: examen/sports-ball-classification
+        run: |
+          if az ml component show --name register_model_cli --label latest &>/dev/null 2>&1; then
+            echo "✅ Component 'register_model_cli' already exists"
+          else
+            echo "🔨 Registering model registration component..."
+            az ml component create -f components/register/register.yaml
+            echo "✅ Registered"
+          fi
+
+  # ============================================================================
+  # Job 4: Upload Datasets
+  # ============================================================================
+  upload-datasets:
+    name: 📁 Upload Datasets
+    runs-on: ubuntu-latest
+    needs: setup-infrastructure
+    if: ${{ github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'train-only' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Azure ML CLI
+        run: |
+          az extension add -n ml -y
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      - name: Upload All Ball Datasets
+        working-directory: examen
+        run: |
+          BALL_TYPES=(
+            "american_football"
+            "baseball"
+            "basketball"
+            "billiard_ball"
+            "bowling_ball"
+            "cricket_ball"
+            "football"
+            "golf_ball"
+            "hockey_ball"
+            "hockey_puck"
+            "rugby_ball"
+            "shuttlecock"
+            "table_tennis_ball"
+            "tennis_ball"
+            "volleyball"
+          )
+
+          echo "📁 Uploading datasets..."
+          echo ""
+
+          for ball in "${BALL_TYPES[@]}"; do
+            if az ml data show --name "$ball" --version 1 &>/dev/null; then
+              echo "✅ '$ball' already exists - skipping"
+            else
+              if [ -d "data/$ball" ]; then
+                echo "🔨 Uploading '$ball'..."
+                az ml data create --name "$ball" --version 1 --path "data/$ball" --type uri_folder
+                echo "✅ '$ball' uploaded"
+              else
+                echo "⚠️ Directory 'data/$ball' not found - skipping"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "✅ Dataset upload complete!"
+
+  # ============================================================================
+  # Job 5: Run Training Pipeline
+  # ============================================================================
+  run-training:
+    name: 🚀 Run Training Pipeline
+    runs-on: ubuntu-latest
+    needs: [setup-components, upload-datasets]
+    if: ${{ github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'setup-only' }}
+
+    outputs:
+      job_name: ${{ steps.submit-job.outputs.job_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Azure ML CLI
+        run: |
+          az extension add -n ml -y
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+
+      - name: Submit Training Pipeline
+        id: submit-job
+        working-directory: examen/sports-ball-classification
+        run: |
+          echo "🚀 Submitting training pipeline..."
+          echo ""
+
+          JOB_NAME=$(az ml job create \
+            -f pipelines/sports-ball-classification.yaml \
+            --set inputs.epochs=${{ github.event.inputs.epochs || '10' }} \
+            --query name -o tsv)
+
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║           🚀 Training Pipeline Submitted!                   ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Job Name: $JOB_NAME"
+          echo "Epochs: ${{ github.event.inputs.epochs || '10' }}"
+          echo ""
+          echo "Monitor with:"
+          echo "  az ml job show --name $JOB_NAME"
+          echo "  az ml job stream --name $JOB_NAME"
+          echo ""
+          echo "View in Azure ML Studio:"
+          echo "  https://ml.azure.com"
+          echo ""
+
+      - name: Stream Training Logs
+        if: ${{ github.event.inputs.wait_for_completion == 'true' }}
+        run: |
+          echo "⏳ Streaming training logs (waiting for completion)..."
+          az ml job stream --name ${{ steps.submit-job.outputs.job_name }}
+
+      - name: Check Job Status
+        if: ${{ github.event.inputs.wait_for_completion == 'true' }}
+        run: |
+          STATUS=$(az ml job show --name ${{ steps.submit-job.outputs.job_name }} --query status -o tsv)
+          echo "Final Status: $STATUS"
+
+          if [ "$STATUS" == "Completed" ]; then
+            echo "✅ Training completed successfully!"
+          else
+            echo "❌ Training did not complete successfully. Status: $STATUS"
+            exit 1
+          fi
+
+  # ============================================================================
+  # Job 6: Cleanup Resources
+  # ============================================================================
+  cleanup:
+    name: 🗑️ Cleanup Azure Resources
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'cleanup' }}
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Delete Resource Group
+        run: |
+          echo "🗑️ Deleting resource group '${{ env.RESOURCE_GROUP }}'..."
+          echo "⚠️ This will delete ALL resources in the group!"
+          echo ""
+
+          az group delete --name ${{ env.RESOURCE_GROUP }} --yes --no-wait
+
+          echo "✅ Deletion initiated (running in background)"
+          echo "   This may take several minutes to complete."
+
+  # ============================================================================
+  # Job 7: Summary
+  # ============================================================================
+  summary:
+    name: 📋 Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [setup-infrastructure, setup-environments, setup-components, upload-datasets, run-training]
+    if: always() && github.event.inputs.action != 'cleanup'
+
+    steps:
+      - name: Print Summary
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║        🏀 Sports Ball Classification - Summary 🏀          ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Resource Group: ${{ env.RESOURCE_GROUP }}"
+          echo "Workspace: ${{ env.WORKSPACE_NAME }}"
+          echo "Compute Cluster: ${{ env.COMPUTE_CLUSTER_NAME }}"
+          echo ""
+          echo "Job Results:"
+          echo "  Infrastructure: ${{ needs.setup-infrastructure.result }}"
+          echo "  Environments: ${{ needs.setup-environments.result }}"
+          echo "  Components: ${{ needs.setup-components.result }}"
+          echo "  Datasets: ${{ needs.upload-datasets.result }}"
+          echo "  Training: ${{ needs.run-training.result }}"
+          echo ""
+
+          if [ "${{ needs.run-training.outputs.job_name }}" != "" ]; then
+            echo "Training Job: ${{ needs.run-training.outputs.job_name }}"
+          fi
+
+          echo ""
+          echo "Next steps:"
+          echo "  1. Wait for training to complete in Azure ML Studio"
+          echo "  2. Download the trained model"
+          echo "  3. Deploy the inference API"
+          echo ""

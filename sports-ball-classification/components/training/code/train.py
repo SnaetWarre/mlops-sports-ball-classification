@@ -1,0 +1,211 @@
+import argparse
+import os
+import random
+from glob import glob
+
+import numpy as np
+import tensorflow as tf
+from sklearn.metrics import classification_report, confusion_matrix
+from tensorflow import keras
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from utils import BALL_CATEGORIES, buildModel, encodeLabels, getFeatures, getTargets
+
+# Hyperparameters
+SEED = 42
+INITIAL_LEARNING_RATE = 0.01
+BATCH_SIZE = 32
+PATIENCE = 11
+MODEL_NAME = "sports-ball-cnn"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--training_folder",
+        type=str,
+        dest="training_folder",
+        help="Training folder mounting point",
+    )
+    parser.add_argument(
+        "--testing_folder",
+        type=str,
+        dest="testing_folder",
+        help="Testing folder mounting point",
+    )
+    parser.add_argument(
+        "--output_folder",
+        type=str,
+        dest="output_folder",
+        help="Output folder for model",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        dest="epochs",
+        default=10,
+        help="The number of epochs to train",
+    )
+    args = parser.parse_args()
+
+    print(" ".join(f"{k}={v}" for k, v in vars(args).items()))
+
+    training_folder = args.training_folder
+    print("Training folder:", training_folder)
+
+    testing_folder = args.testing_folder
+    print("Testing folder:", testing_folder)
+
+    output_folder = args.output_folder
+    print("Output folder:", output_folder)
+
+    MAX_EPOCHS = args.epochs
+    print("Max epochs:", MAX_EPOCHS)
+
+    # Load image paths
+    training_paths = glob(os.path.join(training_folder, "*.jpg"), recursive=True)
+    testing_paths = glob(os.path.join(testing_folder, "*.jpg"), recursive=True)
+
+    print(f"Training samples: {len(training_paths)}")
+    print(f"Testing samples: {len(testing_paths)}")
+
+    # Shuffle with fixed seed for reproducibility
+    random.seed(SEED)
+    random.shuffle(training_paths)
+    random.seed(SEED)
+    random.shuffle(testing_paths)
+
+    print("Sample training paths:", training_paths[:3])
+    print("Sample testing paths:", testing_paths[:3])
+
+    # Extract features (images) and targets (labels)
+    print("\nLoading training data...")
+    X_train = getFeatures(training_paths)
+    y_train = getTargets(training_paths)
+
+    print("Loading testing data...")
+    X_test = getFeatures(testing_paths)
+    y_test = getTargets(testing_paths)
+
+    print(f"\nData shapes:")
+    print(f"X_train: {X_train.shape}")
+    print(f"X_test: {X_test.shape}")
+    print(f"y_train: {len(y_train)} labels")
+    print(f"y_test: {len(y_test)} labels")
+
+    # One-hot encode labels
+    LABELS, y_train_encoded, y_test_encoded = encodeLabels(y_train, y_test)
+    num_classes = len(LABELS)
+
+    print(f"\nNumber of classes: {num_classes}")
+    print(f"y_train shape: {y_train_encoded.shape}")
+    print(f"y_test shape: {y_test_encoded.shape}")
+
+    # Create output directory
+    model_directory = os.path.join(output_folder, MODEL_NAME)
+    os.makedirs(model_directory, exist_ok=True)
+    model_path = os.path.join(model_directory, "model.keras")
+
+    # Save labels for inference
+    labels_path = os.path.join(model_directory, "labels.txt")
+    with open(labels_path, "w") as f:
+        for label in LABELS:
+            f.write(f"{label}\n")
+    print(f"Labels saved to: {labels_path}")
+
+    # Callbacks
+    cb_save_best_model = keras.callbacks.ModelCheckpoint(
+        filepath=model_path,
+        monitor="val_loss",
+        save_best_only=True,
+        verbose=1,
+    )
+
+    cb_early_stop = keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=PATIENCE,
+        verbose=1,
+        restore_best_weights=True,
+    )
+
+    # Learning rate schedule
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=INITIAL_LEARNING_RATE,
+        decay_steps=MAX_EPOCHS,
+        decay_rate=0.5,
+        staircase=True,
+    )
+
+    optimizer = tf.keras.optimizers.SGD(
+        learning_rate=lr_schedule,
+        momentum=0.0,
+        nesterov=False,
+    )
+
+    # Build model for 15 classes (or however many we have)
+    print(f"\nBuilding CNN model for {num_classes} classes...")
+    model = buildModel((64, 64, 3), num_classes)
+
+    model.compile(
+        loss="categorical_crossentropy",
+        optimizer=optimizer,
+        metrics=["accuracy"],
+    )
+
+    model.summary()
+
+    # Data augmentation for training
+    aug = ImageDataGenerator(
+        rotation_range=30,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        shear_range=0.2,
+        zoom_range=0.2,
+        horizontal_flip=True,
+        fill_mode="nearest",
+    )
+
+    # Train the model
+    print("\n[INFO] Training the network...")
+    history = model.fit(
+        aug.flow(X_train, y_train_encoded, batch_size=BATCH_SIZE),
+        validation_data=(X_test, y_test_encoded),
+        steps_per_epoch=len(X_train) // BATCH_SIZE,
+        epochs=MAX_EPOCHS,
+        callbacks=[cb_save_best_model, cb_early_stop],
+    )
+
+    # Evaluate the model
+    print("\n[INFO] Evaluating network...")
+    predictions = model.predict(X_test, batch_size=32)
+
+    print("\nClassification Report:")
+    print(
+        classification_report(
+            y_test_encoded.argmax(axis=1),
+            predictions.argmax(axis=1),
+            target_names=LABELS,
+        )
+    )
+
+    # Confusion matrix
+    cf_matrix = confusion_matrix(
+        y_test_encoded.argmax(axis=1),
+        predictions.argmax(axis=1),
+    )
+    print("\nConfusion Matrix:")
+    print(cf_matrix)
+
+    # Save confusion matrix
+    np.save(os.path.join(output_folder, "confusion_matrix.npy"), cf_matrix)
+
+    # Save training history
+    history_path = os.path.join(output_folder, "training_history.npy")
+    np.save(history_path, history.history)
+
+    print(f"\n[INFO] Model saved to: {model_path}")
+    print(f"[INFO] Confusion matrix saved to: {output_folder}/confusion_matrix.npy")
+    print("[INFO] DONE TRAINING")
+
+
+if __name__ == "__main__":
+    main()

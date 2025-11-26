@@ -1,0 +1,40 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+
+name: training_cli
+version: 0.1.0
+type: command
+display_name: Sports Ball CNN Training
+description: Trains a CNN model for sports ball classification (15 classes)
+
+code: ./code
+environment: azureml:aml-training-cli:0.1.0
+
+command: 'python train.py
+  --training_folder ${{inputs.training_folder}}
+  --testing_folder ${{inputs.testing_folder}}
+  --output_folder ${{outputs.output_model}}
+  --epochs ${{inputs.epochs}}
+  '
+
+inputs:
+  training_folder:
+    type: uri_folder
+    optional: false
+    description: Folder containing training images
+  testing_folder:
+    type: uri_folder
+    optional: false
+    description: Folder containing testing images
+  epochs:
+    type: number
+    optional: false
+    default: 10
+    description: Number of training epochs
+
+outputs:
+  output_model:
+    type: uri_folder
+    description: Output folder containing trained model and artifacts
+
+resources:
+  instance_count: 1

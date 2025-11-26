@@ -1,0 +1,473 @@
+# Triggering workflow run (no functional change)
+name: MLOps Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+env:
+  GROUP: mlops-clean-rg
+  WORKSPACE: mlops-clean-ws
+  LOCATION: westeurope
+  AZURE_CONFIG_DIR: .azure-${{ github.run_id }}
+
+jobs:
+  azure-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Azure CLI cache dir
+        run: |
+          mkdir -p "$AZURE_CONFIG_DIR"
+          # Clear any existing MSAL cache to avoid pickling errors
+          rm -rf "$AZURE_CONFIG_DIR/msal_http_cache" "$AZURE_CONFIG_DIR/msal_token_cache" || true
+          rm -rf ~/.azure/msal_http_cache ~/.azure/msal_token_cache || true
+
+      - name: Set component version
+        run: |
+          COMPONENT_VERSION="$(date -u +%Y%m%d%H%M%S)-${GITHUB_RUN_NUMBER}"
+          echo "Component version for this run: $COMPONENT_VERSION"
+          echo "COMPONENT_VERSION=$COMPONENT_VERSION" >> "$GITHUB_ENV"
+
+      - name: Azure -- Create compute
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            # Parse JSON without jq using Python (available in Azure CLI container)
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+
+            # Ensure workspace has system-assigned managed identity (needed for pipeline jobs)
+            echo "Ensuring workspace has system-assigned managed identity..."
+            WORKSPACE_JSON=$(az ml workspace show --name $WORKSPACE --resource-group $GROUP -o json)
+            WORKSPACE_IDENTITY_TYPE=$(echo "$WORKSPACE_JSON" | python3 -c "import sys, json; ws=json.load(sys.stdin); print(ws.get('identity', {}).get('type', ''))" 2>/dev/null || echo "")
+            if [[ "$WORKSPACE_IDENTITY_TYPE" != *"SystemAssigned"* ]]; then
+              echo "Workspace identity missing. Enabling system-assigned identity via ARM update..."
+              WORKSPACE_RESOURCE_ID=$(echo "$WORKSPACE_JSON" | python3 -c "import sys, json; ws=json.load(sys.stdin); print(ws.get('id', ''))" 2>/dev/null || echo "")
+              if [ -n "$WORKSPACE_RESOURCE_ID" ]; then
+                az resource update --ids "$WORKSPACE_RESOURCE_ID" --set identity.type="SystemAssigned"
+                WORKSPACE_JSON=$(az ml workspace show --name $WORKSPACE --resource-group $GROUP -o json)
+              else
+                echo "WARNING: Could not determine workspace resource ID to enable identity."
+              fi
+            else
+              echo "Workspace already has system-assigned identity."
+            fi
+
+            WORKSPACE_ID=$(echo "$WORKSPACE_JSON" | python3 -c "import sys, json; ws=json.load(sys.stdin); print(ws.get('id', ''))" 2>/dev/null || echo "")
+            WORKSPACE_IDENTITY_ID=$(echo "$WORKSPACE_JSON" | python3 -c "import sys, json; ws=json.load(sys.stdin); print(ws.get('identity', {}).get('principalId', ''))" 2>/dev/null || echo "")
+
+            # Resolve container registry tied to the workspace (needed for role assignments)
+            ACR_NAME=$(echo "$WORKSPACE_JSON" | python3 -c "import sys, json; ws=json.load(sys.stdin); cr=ws.get('containerRegistry', ''); print(cr.split('/')[-1] if cr else '')" 2>/dev/null || echo "")
+            if [ -z "$ACR_NAME" ] || [ "$ACR_NAME" == "null" ] || [ "$ACR_NAME" == "" ]; then
+              ACR_NAME=$(az acr list --resource-group $GROUP --query "[0].name" -o tsv 2>/dev/null || echo "")
+            fi
+            if [ -n "$ACR_NAME" ] && [ "$ACR_NAME" != "null" ]; then
+              ACR_ID=$(az acr show --name "$ACR_NAME" --query id -o tsv 2>/dev/null || echo "")
+            else
+              ACR_ID=""
+            fi
+
+            # Overkill permissions for workspace managed identity (pipeline runtime)
+            if [ -n "$WORKSPACE_IDENTITY_ID" ] && [ "$WORKSPACE_IDENTITY_ID" != "null" ]; then
+              if [ -n "$WORKSPACE_ID" ]; then
+                echo "Granting Contributor to workspace managed identity..."
+                az role assignment create \
+                  --assignee "$WORKSPACE_IDENTITY_ID" \
+                  --role "Contributor" \
+                  --scope "$WORKSPACE_ID" \
+                  || echo "Contributor role for workspace identity may already exist (OK)"
+                echo "Granting Reader to workspace managed identity..."
+                az role assignment create \
+                  --assignee "$WORKSPACE_IDENTITY_ID" \
+                  --role "Reader" \
+                  --scope "$WORKSPACE_ID" \
+                  || echo "Reader role for workspace identity may already exist (OK)"
+              fi
+              if [ -n "$ACR_ID" ]; then
+                echo "Granting AcrPull to workspace managed identity..."
+                az role assignment create \
+                  --assignee "$WORKSPACE_IDENTITY_ID" \
+                  --role "AcrPull" \
+                  --scope "$ACR_ID" \
+                  || echo "AcrPull role for workspace identity may already exist (OK)"
+              fi
+            else
+              echo "WARNING: Workspace identity principal ID unavailable."
+            fi
+            # Check if compute cluster exists
+            echo "Checking if compute cluster exists..."
+            if az ml compute show --name warre-cluster &>/dev/null; then
+              echo "Compute cluster already exists."
+            else
+              echo "Compute cluster not found. Creating with managed identity..."
+              az ml compute create --file ./assignment/environment/compute-cluster.yaml
+            fi
+
+            # Ensure the old compute instance is gone (cleanup)
+            if az ml compute show --name warre-compute &>/dev/null; then
+               echo "Removing legacy compute instance 'warre-compute'..."
+               az ml compute delete --name warre-compute --yes --no-wait || true
+            fi
+
+            # Wait for compute to be fully provisioned
+            echo "Waiting for compute to be fully provisioned..."
+            sleep 10
+
+            # Get the managed identity principal ID from the compute
+            echo "Getting managed identity from compute..."
+            COMPUTE_IDENTITY_ID=$(az ml compute show --name warre-cluster --query identity.principal_id -o tsv 2>/dev/null || echo "")
+
+            if [ -z "$COMPUTE_IDENTITY_ID" ] || [ "$COMPUTE_IDENTITY_ID" == "null" ] || [ "$COMPUTE_IDENTITY_ID" == "" ]; then
+              echo "WARNING: Could not get managed identity from compute. Waiting a bit longer..."
+              sleep 10
+              COMPUTE_IDENTITY_ID=$(az ml compute show --name warre-cluster --query identity.principal_id -o tsv 2>/dev/null || echo "")
+            fi
+
+            if [ -n "$COMPUTE_IDENTITY_ID" ] && [ "$COMPUTE_IDENTITY_ID" != "null" ] && [ "$COMPUTE_IDENTITY_ID" != "" ]; then
+              echo "Found managed identity: $COMPUTE_IDENTITY_ID"
+
+              if [ -n "$ACR_ID" ]; then
+                echo "Granting AcrPull role to compute identity on ACR..."
+                az role assignment create \
+                  --assignee "$COMPUTE_IDENTITY_ID" \
+                  --role "AcrPull" \
+                  --scope "$ACR_ID" \
+                  || echo "ACR role assignment may already exist (this is OK)"
+              else
+                echo "WARNING: Could not determine ACR ID for compute identity binding."
+              fi
+
+              if [ -n "$WORKSPACE_ID" ]; then
+                echo "Granting Reader role to compute managed identity..."
+                az role assignment create \
+                  --assignee "$COMPUTE_IDENTITY_ID" \
+                  --role "Reader" \
+                  --scope "$WORKSPACE_ID" \
+                  || echo "Workspace Reader role assignment may already exist (this is OK)"
+                echo "Granting Contributor role to compute managed identity..."
+                az role assignment create \
+                  --assignee "$COMPUTE_IDENTITY_ID" \
+                  --role "Contributor" \
+                  --scope "$WORKSPACE_ID" \
+                  || echo "Workspace Contributor role assignment may already exist (this is OK)"
+              fi
+            else
+              echo "ERROR: Could not get managed identity from compute after retry"
+            fi
+
+            # Also assign workspace-level Contributor role to service principal
+            if [ -n "$WORKSPACE_ID" ]; then
+              az role assignment create \
+                --assignee "$CLIENT_ID" \
+                --role "Contributor" \
+                --scope "$WORKSPACE_ID" \
+                || echo "Workspace role assignment may already exist"
+            fi
+
+      - name: Azure -- Start Compute
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+
+            # Robust start: Check state first (Clusters don't need explicit start, but we can check provisioning state)
+            STATE=$(az ml compute show --name warre-cluster --query provisioning_state -o tsv)
+            if [ "$STATE" != "Succeeded" ]; then
+               echo "Compute cluster is in state: $STATE"
+            else
+              echo "Compute cluster is ready."
+            fi
+
+      - name: Azure -- Environment Setup
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            az ml environment create --file ./assignment/environment/pillow.yaml
+            az ml environment create --file ./assignment/environment/tensorflow.yaml
+            az ml environment create --file ./assignment/components/register/environment.yaml
+
+      - name: Azure -- Component Setup
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            COMPONENT_VERSION="${COMPONENT_VERSION:-0.1.${GITHUB_RUN_NUMBER}}"
+            echo "Publishing components with version: $COMPONENT_VERSION"
+            # Loop through components (only actual component YAML files, not conda.yaml or environment.yaml)
+            for dir in ./assignment/components/*/; do
+              for file in "$dir"*.yaml; do
+                # Skip conda.yaml and environment.yaml files - only process component definition files (dataprep.yaml, data_split.yaml, training.yaml, register.yaml)
+                basename_file=$(basename "$file")
+                if [[ "$basename_file" != "conda.yaml" ]] && [[ "$basename_file" != "environment.yaml" ]] && [[ -f "$file" ]]; then
+                  echo "Creating component from $file (version $COMPONENT_VERSION)"
+                  az ml component create --file "$file" --set version="$COMPONENT_VERSION"
+                else
+                  echo "Skipping $file (not a component definition)"
+                fi
+              done
+            done
+
+      - name: Azure -- Pipeline Run
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            JOB_NAME="animals-classification-${{ github.sha }}-${{ github.run_id }}"
+            echo "Creating pipeline job: $JOB_NAME"
+            az ml job create \
+              --file ./assignment/pipelines/animals-classification.yaml \
+              --set name="$JOB_NAME" \
+              --set identity.type=user_identity \
+              --query name -o tsv > /tmp/job_name.txt
+            JOB_NAME=$(cat /tmp/job_name.txt)
+            echo "Pipeline job created: $JOB_NAME"
+
+            echo "Waiting for pipeline job to complete..."
+            az ml job stream --name "$JOB_NAME" || true
+            echo "Checking final job status..."
+            JOB_STATUS=$(az ml job show --name "$JOB_NAME" --query status -o tsv)
+            echo "Job status: $JOB_STATUS"
+            if [ "$JOB_STATUS" != "Completed" ]; then
+              echo "ERROR: Pipeline job status is '$JOB_STATUS', not 'Completed'. Model may not be registered."
+              echo "Job details:"
+              az ml job show --name "$JOB_NAME" --query "{status:status, displayName:display_name}" -o table
+              exit 1
+            fi
+            echo "Pipeline job completed successfully. Checking child jobs..."
+            # List all child jobs to see their status
+            echo "Child jobs status:"
+            az ml job list --parent-job-name "$JOB_NAME" --query "[].{name:name, displayName:display_name, status:status}" -o table
+            echo "Registration handled by pipeline register component; no manual action needed."
+
+      - name: Cleanup Compute
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            # Don't stop compute - keep it running for model registration to complete
+            # az ml compute stop --name warre-compute
+            echo "Compute left running to ensure model registration completes"
+        continue-on-error: true
+
+  download:
+    needs: azure-pipeline
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Azure CLI cache dir
+        run: |
+          mkdir -p "$AZURE_CONFIG_DIR"
+          # Clear any existing MSAL cache to avoid pickling errors
+          rm -rf "$AZURE_CONFIG_DIR/msal_http_cache" "$AZURE_CONFIG_DIR/msal_token_cache" || true
+          rm -rf ~/.azure/msal_http_cache ~/.azure/msal_token_cache || true
+
+      - name: Azure -- Download Model
+        uses: Azure/CLI@v2.1.0
+        env:
+          AZURE_CONFIG_DIR: ${{ env.AZURE_CONFIG_DIR }}
+        with:
+          azcliversion: 2.64.0
+          inlineScript: |
+            export AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR"
+            CREDS='${{ secrets.AZURE_CREDENTIALS }}'
+            CLIENT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])" <<< "$CREDS")
+            CLIENT_SECRET=$(python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])" <<< "$CREDS")
+            TENANT_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])" <<< "$CREDS")
+            SUB_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin)['subscriptionId'])" <<< "$CREDS")
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" --output none
+            az account set --subscription "$SUB_ID"
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            # Wait for model to be registered (with retries)
+            # First, try to get the actual model name from the most recent model
+            echo "Waiting for model to be registered..."
+            MAX_RETRIES=30
+            RETRY_COUNT=0
+            VERSION=""
+            MODEL_NAME="animal-classification"  # Default to expected name
+
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              # Try to get the latest version of the model using model show
+              VERSION=$(az ml model show --name animal-classification --version latest --query version -o tsv 2>/dev/null || echo "")
+
+              # If that fails, try listing and getting the first (should be latest)
+              if [ -z "$VERSION" ] || [ "$VERSION" = "null" ] || [ "$VERSION" = "" ]; then
+                VERSION=$(az ml model list --name animal-classification --query "[0].version" -o tsv 2>/dev/null || echo "")
+              fi
+
+              if [ -n "$VERSION" ] && [ "$VERSION" != "null" ] && [ "$VERSION" != "" ]; then
+                echo "Model found! Name: $MODEL_NAME, Version: $VERSION"
+                break
+              fi
+
+              # Also try getting any model (in case name differs)
+              if [ -z "$VERSION" ] || [ "$VERSION" = "null" ] || [ "$VERSION" = "" ]; then
+                ALL_MODELS_JSON=$(az ml model list --query "[].{name:name, version:version}" -o json 2>/dev/null || echo "[]")
+                if [ "$ALL_MODELS_JSON" != "[]" ] && [ -n "$ALL_MODELS_JSON" ]; then
+                  # Use Python to parse JSON and get the most recent
+                  RECENT_MODEL=$(echo "$ALL_MODELS_JSON" | python3 -c "import sys, json; models=json.load(sys.stdin); print(f\"{models[-1]['name']}\t{models[-1]['version']}\")" 2>/dev/null || echo "")
+                  if [ -n "$RECENT_MODEL" ]; then
+                    RECENT_NAME=$(echo "$RECENT_MODEL" | cut -f1)
+                    RECENT_VERSION=$(echo "$RECENT_MODEL" | cut -f2)
+                    echo "Found recent model: $RECENT_NAME version $RECENT_VERSION"
+                    if [ "$RECENT_NAME" != "" ] && [ "$RECENT_VERSION" != "" ]; then
+                      MODEL_NAME="$RECENT_NAME"
+                      VERSION="$RECENT_VERSION"
+                      echo "Using model: $MODEL_NAME version $VERSION"
+                      break
+                    fi
+                  fi
+                fi
+              fi
+
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "Attempt $RETRY_COUNT/$MAX_RETRIES: Model not found yet, waiting 10 seconds..."
+              if [ $RETRY_COUNT -eq 5 ] || [ $RETRY_COUNT -eq 15 ]; then
+                echo "Debug: Listing all models:"
+                az ml model list --query "[].{name:name, version:version}" -o table 2>/dev/null || echo "Could not list models"
+              fi
+              sleep 10
+            done
+
+            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ] || [ "$VERSION" = "" ]; then
+              echo "ERROR: No model found after $MAX_RETRIES attempts."
+              echo "Listing all models to debug:"
+              az ml model list --query "[].{name:name, version:version}" -o table
+              exit 1
+            fi
+
+            echo "Downloading model: $MODEL_NAME version $VERSION"
+            az ml model download --name "$MODEL_NAME" --version "$VERSION" --download-path ./assignment/inference/model --resource-group $GROUP --workspace-name $WORKSPACE
+
+      - name: Docker -- Upload API code from Inference
+        uses: actions/upload-artifact@v4.3.3
+        with:
+          name: docker-config
+          path: assignment/inference
+
+  deploy:
+    needs: download
+    runs-on: self-hosted
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Docker -- Gather Tags
+        id: docker-meta-data
+        uses: docker/metadata-action@v5.5.1
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/mlops-animals-api
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - name: Docker -- Login to GHCR
+        uses: docker/login-action@v3.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker -- Download API Code for Inference
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: docker-config
+          path: inference
+
+      - name: Docker Build and push
+        id: docker_build
+        uses: docker/build-push-action@v5.3.0
+        with:
+          context: ./assignment/inference
+          push: true
+          tags: ${{ steps.docker-meta-data.outputs.tags }}
+
+      - name: Prepare Kubernetes Config
+        run: |
+          mkdir -p $HOME/.kube
+          printf '%s\n' "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Kubernetes -- Deploy
+        run: |
+          kubectl apply -f ./assignment/kubernetes/deployment.yaml
