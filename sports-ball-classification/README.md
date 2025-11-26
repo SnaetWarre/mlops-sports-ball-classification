@@ -79,13 +79,13 @@ sports-ball-classification/
 az login
 
 # Create resource group
-az group create --name mlops-sports-ball-rg --location westeurope
+az group create --name mlops-examen-rg --location westeurope
 
 # Create ML workspace
-az ml workspace create --name mlops-sports-ball-ws --resource-group mlops-sports-ball-rg
+az ml workspace create --name mlops-sports-ball-ws --resource-group mlops-examen-rg
 
 # Set defaults
-az configure --defaults group=mlops-sports-ball-rg workspace=mlops-sports-ball-ws
+az configure --defaults group=mlops-examen-rg workspace=mlops-sports-ball-ws
 ```
 
 ### 2. Create Compute & Environments
@@ -218,7 +218,7 @@ Response:
 Don't forget to delete Azure resources when done to save costs:
 
 ```bash
-az group delete --name mlops-sports-ball-rg --yes --no-wait
+az group delete --name mlops-examen-rg --yes --no-wait
 ```
 
 ## 📄 License

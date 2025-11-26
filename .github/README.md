@@ -58,7 +58,7 @@ Trigger the workflow manually with these actions:
 ### Environment Variables
 
 ```yaml
-RESOURCE_GROUP: mlops-sports-ball-rg
+RESOURCE_GROUP: mlops-examen-rg
 WORKSPACE_NAME: mlops-sports-ball-ws
 LOCATION: westeurope
 COMPUTE_CLUSTER_NAME: sports-ball-cluster
