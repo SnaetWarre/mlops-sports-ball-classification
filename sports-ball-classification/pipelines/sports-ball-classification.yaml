@@ -1,7 +1,7 @@
 $schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
 
 type: pipeline
-name: sports-ball-classification-cli
+# name is omitted to let Azure ML auto-generate a unique job name
 display_name: Sports Ball Classification
 experiment_name: sports-ball-classification
 
