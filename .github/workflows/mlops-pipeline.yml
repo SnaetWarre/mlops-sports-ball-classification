@@ -158,27 +158,27 @@ jobs:
           echo "🌍 Setting up ML environments..."
 
           # Preprocessing environment
-          if az ml environment show --name aml-preprocessing-cli --label latest &>/dev/null 2>&1; then
+          if az ml environment show --name aml-preprocessing-cli --version 0.1.0 &>/dev/null 2>&1; then
             echo "✅ Preprocessing environment exists"
           else
             echo "🔨 Creating preprocessing environment..."
-            az ml environment create -f environment/preprocessing.yaml
+            az ml environment create -f environment/preprocessing.yaml || echo "⚠️ May already exist"
           fi
 
           # Training environment
-          if az ml environment show --name aml-training-cli --label latest &>/dev/null 2>&1; then
+          if az ml environment show --name aml-training-cli --version 0.1.0 &>/dev/null 2>&1; then
             echo "✅ Training environment exists"
           else
             echo "🔨 Creating training environment..."
-            az ml environment create -f environment/training.yaml
+            az ml environment create -f environment/training.yaml || echo "⚠️ May already exist"
           fi
 
-          # Register environment
-          if az ml environment show --name aml-register-cli --label latest &>/dev/null 2>&1; then
-            echo "✅ Register environment exists"
+          # Register environment - version 0.2.0 with REST API dependencies
+          if az ml environment show --name aml-register-cli --version 0.2.0 &>/dev/null 2>&1; then
+            echo "✅ Register environment v0.2.0 exists"
           else
-            echo "🔨 Creating register environment..."
-            az ml environment create -f components/register/environment.yaml
+            echo "🔨 Creating register environment v0.2.0..."
+            az ml environment create -f components/register/environment.yaml || echo "⚠️ May already exist"
           fi
 
           echo "✅ All environments ready"
