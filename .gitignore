@@ -100,11 +100,11 @@ secrets/
 credentials.json
 service-principal.json
 
-# Large data files (keep structure but not content)
-data/*/*.jpg
-data/*/*.jpeg
-data/*/*.png
-!data/*/.gitkeep
+# Large data files - commented out to allow training data to be committed
+# data/*/*.jpg
+# data/*/*.jpeg
+# data/*/*.png
+# !data/*/.gitkeep
 
 # GitHub Actions runner
 actions-runner/

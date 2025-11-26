@@ -184,18 +184,42 @@ jobs:
             "table_tennis_ball" "tennis_ball" "volleyball"
           )
 
+          FAILED=0
           for ball in "${BALL_TYPES[@]}"; do
             if az ml data show --name "$ball" --version 1 &>/dev/null; then
-              echo "✅ '$ball' exists"
+              echo "✅ '$ball' already registered in Azure ML"
             else
               if [ -d "data/$ball" ]; then
-                echo "🔨 Uploading '$ball'..."
-                az ml data create --name "$ball" --version 1 --path "data/$ball" --type uri_folder
+                # Check if directory has files
+                FILE_COUNT=$(find "data/$ball" -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" \) | wc -l)
+                if [ "$FILE_COUNT" -gt 0 ]; then
+                  echo "🔨 Uploading '$ball' ($FILE_COUNT images)..."
+                  if az ml data create --name "$ball" --version 1 --path "data/$ball" --type uri_folder; then
+                    echo "✅ '$ball' uploaded successfully"
+                  else
+                    echo "❌ Failed to upload '$ball'"
+                    FAILED=1
+                  fi
+                else
+                  echo "⚠️ Warning: 'data/$ball' exists but contains no images!"
+                  echo "   Make sure image files are committed to the repository."
+                  FAILED=1
+                fi
+              else
+                echo "❌ Error: Directory 'data/$ball' not found!"
+                FAILED=1
               fi
             fi
           done
 
-          echo "✅ All datasets uploaded"
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "❌ Some datasets failed to upload. Check the logs above."
+            echo "   Tip: Make sure image files are not excluded in .gitignore"
+            exit 1
+          fi
+
+          echo "✅ All datasets uploaded successfully"
 
       - name: Verify Infrastructure
         id: verify
