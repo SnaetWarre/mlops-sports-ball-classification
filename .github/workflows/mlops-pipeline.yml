@@ -51,6 +51,7 @@ jobs:
 
     outputs:
       infrastructure_ready: ${{ steps.verify.outputs.ready }}
+      component_version: ${{ steps.register-components.outputs.component_version }}
 
     steps:
       - name: Checkout code
@@ -107,6 +108,50 @@ jobs:
             echo "✅ Compute cluster created"
           fi
 
+      - name: Grant Compute Identity Model Registration Permissions
+        run: |
+          echo "🔐 Granting compute cluster identity permissions to register models..."
+
+          # Get the workspace resource ID
+          WORKSPACE_ID=$(az ml workspace show \
+            --name ${{ env.WORKSPACE_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query id -o tsv)
+
+          # Get the compute cluster's managed identity principal ID
+          IDENTITY_PRINCIPAL_ID=$(az ml compute show \
+            --name ${{ env.COMPUTE_CLUSTER_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --workspace-name ${{ env.WORKSPACE_NAME }} \
+            --query identity.principal_id -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$IDENTITY_PRINCIPAL_ID" ] || [ "$IDENTITY_PRINCIPAL_ID" == "null" ]; then
+            echo "⚠️ Compute cluster does not have a system-assigned identity or it's not available yet"
+            echo "   The model registration step may fail. Consider enabling system-assigned identity on the cluster."
+          else
+            echo "📌 Compute identity principal ID: $IDENTITY_PRINCIPAL_ID"
+            echo "📌 Workspace ID: $WORKSPACE_ID"
+
+            # Check if role assignment already exists
+            EXISTING_ROLE=$(az role assignment list \
+              --assignee "$IDENTITY_PRINCIPAL_ID" \
+              --scope "$WORKSPACE_ID" \
+              --role "Contributor" \
+              --query "[0].id" -o tsv 2>/dev/null || echo "")
+
+            if [ -n "$EXISTING_ROLE" ]; then
+              echo "✅ Contributor role already assigned to compute identity"
+            else
+              echo "🔨 Assigning Contributor role to compute identity..."
+              az role assignment create \
+                --assignee-object-id "$IDENTITY_PRINCIPAL_ID" \
+                --assignee-principal-type ServicePrincipal \
+                --role "Contributor" \
+                --scope "$WORKSPACE_ID" || echo "⚠️ Role assignment failed (may already exist or lack permissions)"
+              echo "✅ Role assignment complete"
+            fi
+          fi
+
       - name: Create/Verify Environments
         working-directory: sports-ball-classification
         run: |
@@ -139,39 +184,30 @@ jobs:
           echo "✅ All environments ready"
 
       - name: Register ML Components
+        id: register-components
         working-directory: sports-ball-classification
         run: |
           echo "🧩 Registering ML components..."
 
-          # Data prep component
-          if az ml component show --name data_prep_image_resize_cli --label latest &>/dev/null 2>&1; then
-            echo "✅ Dataprep component exists"
-          else
-            az ml component create -f components/dataprep/dataprep.yaml
-          fi
+          # Generate a unique version based on run number
+          VERSION="1.0.${{ github.run_number }}"
+          echo "📌 Using component version: $VERSION"
 
-          # Data split component
-          if az ml component show --name data_split_cli --label latest &>/dev/null 2>&1; then
-            echo "✅ Data split component exists"
-          else
-            az ml component create -f components/dataprep/data_split.yaml
-          fi
+          # Register components - create new versions each time to avoid immutability issues
+          echo "🔨 Registering data_prep_image_resize_cli..."
+          az ml component create -f components/dataprep/dataprep.yaml --set version="$VERSION" || echo "⚠️ May already exist"
 
-          # Training component
-          if az ml component show --name training_cli --label latest &>/dev/null 2>&1; then
-            echo "✅ Training component exists"
-          else
-            az ml component create -f components/training/training.yaml
-          fi
+          echo "🔨 Registering data_split_cli..."
+          az ml component create -f components/dataprep/data_split.yaml --set version="$VERSION" || echo "⚠️ May already exist"
 
-          # Register component
-          if az ml component show --name register_model_cli --label latest &>/dev/null 2>&1; then
-            echo "✅ Register component exists"
-          else
-            az ml component create -f components/register/register.yaml
-          fi
+          echo "🔨 Registering training_cli..."
+          az ml component create -f components/training/training.yaml --set version="$VERSION" || echo "⚠️ May already exist"
 
-          echo "✅ All components registered"
+          echo "🔨 Registering register_model_cli..."
+          az ml component create -f components/register/register.yaml --set version="$VERSION" || echo "⚠️ May already exist"
+
+          echo "✅ All components registered with version $VERSION"
+          echo "component_version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Upload Training Datasets
         run: |
@@ -255,11 +291,44 @@ jobs:
           az extension add -n ml -y
           az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
 
+      - name: Verify Data Assets Exist
+        run: |
+          echo "🔍 Verifying data assets are registered in Azure ML..."
+
+          BALL_TYPES=(
+            "american_football" "baseball" "basketball" "billiard_ball"
+            "bowling_ball" "cricket_ball" "football" "golf_ball"
+            "hockey_ball" "hockey_puck" "rugby_ball" "shuttlecock"
+            "table_tennis_ball" "tennis_ball" "volleyball"
+          )
+
+          MISSING=0
+          for ball in "${BALL_TYPES[@]}"; do
+            if az ml data show --name "$ball" --version 1 &>/dev/null; then
+              echo "✅ $ball:1 exists"
+            else
+              echo "❌ $ball:1 NOT FOUND"
+              MISSING=1
+            fi
+          done
+
+          if [ "$MISSING" -eq 1 ]; then
+            echo ""
+            echo "❌ Some data assets are missing! Please run the setup-azure job first."
+            exit 1
+          fi
+
+          echo "✅ All data assets verified"
+
       - name: Submit Training Pipeline
         id: submit
         working-directory: sports-ball-classification
         run: |
           echo "🚀 Submitting training pipeline..."
+
+          # Get the component version from the previous step
+          COMP_VERSION="${{ needs.setup-azure.outputs.component_version || '1.0.0' }}"
+          echo "📌 Using component version: $COMP_VERSION"
 
           JOB_NAME=$(az ml job create \
             -f pipelines/sports-ball-classification.yaml \
