@@ -33,7 +33,7 @@ on:
     paths:
       - "sports-ball-classification/**"
       - "data/**"
-
+      - ".github/workflows/**"
 env:
   RESOURCE_GROUP: mlops-examen-rg
   WORKSPACE_NAME: mlops-sports-ball-ws
