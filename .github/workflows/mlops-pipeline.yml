@@ -101,12 +101,20 @@ jobs:
         working-directory: sports-ball-classification
         run: |
           echo "🔍 Checking compute cluster..."
+          CLUSTER_EXISTS=false
           if az ml compute show --name ${{ env.COMPUTE_CLUSTER_NAME }} &>/dev/null; then
             echo "✅ Compute cluster '${{ env.COMPUTE_CLUSTER_NAME }}' exists"
+            CLUSTER_EXISTS=true
           else
             echo "🔨 Creating compute cluster..."
             az ml compute create -f environment/compute-cluster.yaml
             echo "✅ Compute cluster created"
+          fi
+
+          # If cluster was just created, wait for identity to be provisioned
+          if [ "$CLUSTER_EXISTS" = false ]; then
+            echo "⏳ Waiting for compute cluster identity to be provisioned..."
+            sleep 30
           fi
 
       - name: Grant Compute Identity Model Registration Permissions
@@ -119,38 +127,72 @@ jobs:
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --query id -o tsv)
 
-          # Get the compute cluster's managed identity principal ID
-          IDENTITY_PRINCIPAL_ID=$(az ml compute show \
-            --name ${{ env.COMPUTE_CLUSTER_NAME }} \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --workspace-name ${{ env.WORKSPACE_NAME }} \
-            --query identity.principal_id -o tsv 2>/dev/null || echo "")
+          # Wait for the compute cluster's managed identity to become available (retry loop)
+          echo "🔍 Getting compute cluster managed identity..."
+          IDENTITY_PRINCIPAL_ID=""
+          for i in {1..12}; do
+            IDENTITY_PRINCIPAL_ID=$(az ml compute show \
+              --name ${{ env.COMPUTE_CLUSTER_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --workspace-name ${{ env.WORKSPACE_NAME }} \
+              --query identity.principal_id -o tsv 2>/dev/null || echo "")
+
+            if [ -n "$IDENTITY_PRINCIPAL_ID" ] && [ "$IDENTITY_PRINCIPAL_ID" != "null" ]; then
+              echo "✅ Found identity principal ID: $IDENTITY_PRINCIPAL_ID"
+              break
+            fi
+
+            echo "   Waiting for identity to be available... (attempt $i/12)"
+            sleep 10
+          done
 
           if [ -z "$IDENTITY_PRINCIPAL_ID" ] || [ "$IDENTITY_PRINCIPAL_ID" == "null" ]; then
-            echo "⚠️ Compute cluster does not have a system-assigned identity or it's not available yet"
-            echo "   The model registration step may fail. Consider enabling system-assigned identity on the cluster."
+            echo "❌ ERROR: Compute cluster managed identity not available after 2 minutes"
+            echo "   Please ensure the compute cluster has system-assigned identity enabled."
+            echo "   You may need to manually run:"
+            echo "   az role assignment create --assignee-object-id <PRINCIPAL_ID> --assignee-principal-type ServicePrincipal --role 'AzureML Data Scientist' --scope '$WORKSPACE_ID'"
+            exit 1
+          fi
+
+          echo "📌 Compute identity principal ID: $IDENTITY_PRINCIPAL_ID"
+          echo "📌 Workspace ID: $WORKSPACE_ID"
+
+          # Check if AzureML Data Scientist role assignment already exists
+          EXISTING_ROLE=$(az role assignment list \
+            --assignee "$IDENTITY_PRINCIPAL_ID" \
+            --scope "$WORKSPACE_ID" \
+            --role "AzureML Data Scientist" \
+            --query "[0].id" -o tsv 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_ROLE" ]; then
+            echo "✅ AzureML Data Scientist role already assigned to compute identity"
           else
-            echo "📌 Compute identity principal ID: $IDENTITY_PRINCIPAL_ID"
-            echo "📌 Workspace ID: $WORKSPACE_ID"
+            echo "🔨 Assigning AzureML Data Scientist role to compute identity..."
 
-            # Check if AzureML Data Scientist role assignment already exists
-            # This role is required for ML data-plane operations (model registration, etc.)
-            EXISTING_ROLE=$(az role assignment list \
-              --assignee "$IDENTITY_PRINCIPAL_ID" \
-              --scope "$WORKSPACE_ID" \
+            # Attempt role assignment with proper error handling
+            if az role assignment create \
+              --assignee-object-id "$IDENTITY_PRINCIPAL_ID" \
+              --assignee-principal-type ServicePrincipal \
               --role "AzureML Data Scientist" \
-              --query "[0].id" -o tsv 2>/dev/null || echo "")
-
-            if [ -n "$EXISTING_ROLE" ]; then
-              echo "✅ AzureML Data Scientist role already assigned to compute identity"
-            else
-              echo "🔨 Assigning AzureML Data Scientist role to compute identity..."
-              az role assignment create \
-                --assignee-object-id "$IDENTITY_PRINCIPAL_ID" \
-                --assignee-principal-type ServicePrincipal \
-                --role "AzureML Data Scientist" \
-                --scope "$WORKSPACE_ID" || echo "⚠️ Role assignment failed (may already exist or lack permissions)"
+              --scope "$WORKSPACE_ID" 2>&1; then
               echo "✅ AzureML Data Scientist role assignment complete"
+            else
+              echo ""
+              echo "❌ ERROR: Role assignment failed!"
+              echo ""
+              echo "   This usually means the service principal (AZURE_CREDENTIALS) doesn't have"
+              echo "   permission to assign roles. The service principal needs 'Owner' or"
+              echo "   'User Access Administrator' role on the resource group."
+              echo ""
+              echo "   To fix this, run the following command with an Owner account:"
+              echo ""
+              echo "   az role assignment create \\"
+              echo "     --assignee-object-id $IDENTITY_PRINCIPAL_ID \\"
+              echo "     --assignee-principal-type ServicePrincipal \\"
+              echo "     --role 'AzureML Data Scientist' \\"
+              echo "     --scope '$WORKSPACE_ID'"
+              echo ""
+              exit 1
             fi
           fi
 
@@ -439,46 +481,82 @@ jobs:
           echo "📥 Downloading model..."
 
           MODEL_VERSION="${{ steps.get-model.outputs.model_version }}"
-          MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
 
-          # Create model directory
-          mkdir -p "$MODEL_DIR"
+          # Use a permanent location on the self-hosted runner (outside workspace)
+          PERSISTENT_MODEL_DIR="$HOME/mlops-models/${{ env.MODEL_NAME }}"
+          WORKSPACE_MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
+          TEMP_DOWNLOAD_DIR="/tmp/model-download-$$"
 
-          # Download the model
+          # Create directories
+          mkdir -p "$PERSISTENT_MODEL_DIR"
+          mkdir -p "$WORKSPACE_MODEL_DIR"
+          mkdir -p "$TEMP_DOWNLOAD_DIR"
+
+          # Download the model to temp location first
           az ml model download \
             --name ${{ env.MODEL_NAME }} \
             --version $MODEL_VERSION \
-            --download-path "$MODEL_DIR"
+            --download-path "$TEMP_DOWNLOAD_DIR"
 
           echo ""
           echo "📁 Downloaded model contents:"
-          ls -la "$MODEL_DIR"
-          find "$MODEL_DIR" -type f
+          find "$TEMP_DOWNLOAD_DIR" -type f
 
-          # Move model files to expected location if nested
-          if [ -d "$MODEL_DIR/${{ env.MODEL_NAME }}" ]; then
-            mv "$MODEL_DIR/${{ env.MODEL_NAME }}"/* "$MODEL_DIR/" 2>/dev/null || true
-            rmdir "$MODEL_DIR/${{ env.MODEL_NAME }}" 2>/dev/null || true
+          # Find the model.keras file and flatten the structure
+          MODEL_FILE=$(find "$TEMP_DOWNLOAD_DIR" -name "model.keras" -type f | head -1)
+          LABELS_FILE=$(find "$TEMP_DOWNLOAD_DIR" -name "labels.txt" -type f | head -1)
+
+          if [ -n "$MODEL_FILE" ]; then
+            echo "📦 Found model at: $MODEL_FILE"
+            cp "$MODEL_FILE" "$PERSISTENT_MODEL_DIR/model.keras"
+            cp "$MODEL_FILE" "$WORKSPACE_MODEL_DIR/model.keras"
+
+            if [ -n "$LABELS_FILE" ]; then
+              cp "$LABELS_FILE" "$PERSISTENT_MODEL_DIR/labels.txt"
+              cp "$LABELS_FILE" "$WORKSPACE_MODEL_DIR/labels.txt"
+            fi
+          else
+            # Fallback: copy everything
+            cp -r "$TEMP_DOWNLOAD_DIR"/* "$PERSISTENT_MODEL_DIR/" 2>/dev/null || true
+            cp -r "$TEMP_DOWNLOAD_DIR"/* "$WORKSPACE_MODEL_DIR/" 2>/dev/null || true
           fi
 
+          # Cleanup temp directory
+          rm -rf "$TEMP_DOWNLOAD_DIR"
+
           echo ""
+          echo "📁 Persistent model location: $PERSISTENT_MODEL_DIR"
+          ls -la "$PERSISTENT_MODEL_DIR"
+          echo ""
+          echo "📁 Workspace model location: $WORKSPACE_MODEL_DIR"
+          ls -la "$WORKSPACE_MODEL_DIR"
+
+          # Save the persistent path for the deploy job
+          echo "persistent_model_dir=$PERSISTENT_MODEL_DIR" >> $GITHUB_OUTPUT
           echo "success=true" >> $GITHUB_OUTPUT
-          echo "✅ Model downloaded to $MODEL_DIR"
+          echo "✅ Model downloaded and stored in persistent location"
 
       - name: Verify Model Files
         run: |
-          MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
+          PERSISTENT_MODEL_DIR="$HOME/mlops-models/${{ env.MODEL_NAME }}"
+          WORKSPACE_MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
 
           echo "🔍 Verifying model files..."
 
-          if [ -f "$MODEL_DIR/model.keras" ] || [ -f "$MODEL_DIR/saved_model.pb" ] || [ -d "$MODEL_DIR/variables" ]; then
-            echo "✅ Model files verified!"
-            ls -la "$MODEL_DIR"
+          # Check persistent location
+          if [ -f "$PERSISTENT_MODEL_DIR/model.keras" ]; then
+            echo "✅ Model verified in persistent location!"
+            ls -la "$PERSISTENT_MODEL_DIR"
           else
-            echo "📁 Model directory contents:"
-            find "$MODEL_DIR" -type f 2>/dev/null || echo "No files found"
-            echo ""
-            echo "⚠️ Expected model format not found, but files may still be usable"
+            echo "⚠️ Model not found in persistent location: $PERSISTENT_MODEL_DIR"
+          fi
+
+          # Check workspace location
+          if [ -f "$WORKSPACE_MODEL_DIR/model.keras" ]; then
+            echo "✅ Model verified in workspace location!"
+            ls -la "$WORKSPACE_MODEL_DIR"
+          else
+            echo "⚠️ Model not found in workspace location: $WORKSPACE_MODEL_DIR"
           fi
 
   # ============================================================================
@@ -505,6 +583,66 @@ jobs:
           echo ""
           echo "🖥️  Host: $(hostname)"
           echo "📁 Working directory: $(pwd)"
+
+      - name: Azure Login (CLI)
+        run: |
+          echo "🔐 Logging into Azure..."
+          # Parse credentials from secret
+          echo '${{ secrets.AZURE_CREDENTIALS }}' > /tmp/azure_creds.json
+
+          CLIENT_ID=$(cat /tmp/azure_creds.json | python3 -c "import sys, json; print(json.load(sys.stdin)['clientId'])")
+          CLIENT_SECRET=$(cat /tmp/azure_creds.json | python3 -c "import sys, json; print(json.load(sys.stdin)['clientSecret'])")
+          TENANT_ID=$(cat /tmp/azure_creds.json | python3 -c "import sys, json; print(json.load(sys.stdin)['tenantId'])")
+
+          az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID"
+          rm /tmp/azure_creds.json
+
+          az extension add -n ml -y 2>/dev/null || true
+          az configure --defaults group=${{ env.RESOURCE_GROUP }} workspace=${{ env.WORKSPACE_NAME }}
+          echo "✅ Logged in successfully"
+
+      - name: Restore Model from Persistent Storage
+        run: |
+          echo "📦 Restoring model from persistent storage..."
+
+          PERSISTENT_MODEL_DIR="$HOME/mlops-models/${{ env.MODEL_NAME }}"
+          WORKSPACE_MODEL_DIR="sports-ball-classification/inference/model/${{ env.MODEL_NAME }}"
+
+          # Create workspace model directory
+          mkdir -p "$WORKSPACE_MODEL_DIR"
+
+          # Copy model from persistent location to workspace
+          if [ -f "$PERSISTENT_MODEL_DIR/model.keras" ]; then
+            cp "$PERSISTENT_MODEL_DIR/model.keras" "$WORKSPACE_MODEL_DIR/model.keras"
+            if [ -f "$PERSISTENT_MODEL_DIR/labels.txt" ]; then
+              cp "$PERSISTENT_MODEL_DIR/labels.txt" "$WORKSPACE_MODEL_DIR/labels.txt"
+            fi
+            echo "✅ Model restored from persistent storage"
+            ls -la "$WORKSPACE_MODEL_DIR"
+          else
+            echo "⚠️ No model found in persistent storage at $PERSISTENT_MODEL_DIR"
+            echo "   Attempting to download from Azure ML..."
+
+            # Fallback: download directly if persistent storage is empty
+            MODEL_VERSION=$(az ml model list --name ${{ env.MODEL_NAME }} --query "[0].version" -o tsv 2>/dev/null || echo "")
+            if [ -n "$MODEL_VERSION" ]; then
+              TEMP_DIR="/tmp/model-fallback-$$"
+              mkdir -p "$TEMP_DIR"
+              az ml model download --name ${{ env.MODEL_NAME }} --version $MODEL_VERSION --download-path "$TEMP_DIR"
+
+              MODEL_FILE=$(find "$TEMP_DIR" -name "model.keras" -type f | head -1)
+              if [ -n "$MODEL_FILE" ]; then
+                cp "$MODEL_FILE" "$WORKSPACE_MODEL_DIR/model.keras"
+                mkdir -p "$PERSISTENT_MODEL_DIR"
+                cp "$MODEL_FILE" "$PERSISTENT_MODEL_DIR/model.keras"
+                echo "✅ Model downloaded and stored"
+              fi
+              rm -rf "$TEMP_DIR"
+            else
+              echo "❌ Could not find model in Azure ML"
+              exit 1
+            fi
+          fi
 
       - name: Stop Existing Containers
         working-directory: sports-ball-classification/inference

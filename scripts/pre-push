@@ -1,0 +1,150 @@
+#!/bin/bash
+# =============================================================================
+# Git Pre-Push Hook - Azure MLOps Permissions Check
+# =============================================================================
+# This hook runs before every git push and ensures your Azure service principal
+# has the correct permissions for the MLOps pipeline.
+#
+# Installation:
+#   cp scripts/pre-push .git/hooks/pre-push
+#   chmod +x .git/hooks/pre-push
+#
+# Or run the install script:
+#   ./scripts/install-hooks.sh
+# =============================================================================
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Configuration
+RESOURCE_GROUP="mlops-examen-rg"
+CHECK_FILE="$HOME/.mlops-azure-checked"
+CHECK_INTERVAL=86400  # Re-check every 24 hours (in seconds)
+
+echo -e "${BLUE}🔍 Pre-push hook: Checking Azure MLOps setup...${NC}"
+
+# Skip check if recently verified
+if [ -f "$CHECK_FILE" ]; then
+    LAST_CHECK=$(cat "$CHECK_FILE" 2>/dev/null || echo "0")
+    CURRENT_TIME=$(date +%s)
+    TIME_DIFF=$((CURRENT_TIME - LAST_CHECK))
+
+    if [ $TIME_DIFF -lt $CHECK_INTERVAL ]; then
+        echo -e "${GREEN}✅ Azure permissions verified recently ($(($TIME_DIFF / 3600))h ago). Skipping check.${NC}"
+        exit 0
+    fi
+fi
+
+# Check if az CLI is available
+if ! command -v az &> /dev/null; then
+    echo -e "${YELLOW}⚠️  Azure CLI not installed. Skipping permissions check.${NC}"
+    echo "   Install Azure CLI to enable automatic permissions verification."
+    exit 0
+fi
+
+# Check if logged in
+if ! az account show &> /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  Not logged into Azure CLI. Skipping permissions check.${NC}"
+    echo "   Run 'az login' to enable automatic permissions verification."
+    exit 0
+fi
+
+# Look for service principal credentials
+SP_CLIENT_ID=""
+CREDENTIALS_FILE=".azure-credentials.json"
+
+if [ -f "$CREDENTIALS_FILE" ]; then
+    SP_CLIENT_ID=$(cat "$CREDENTIALS_FILE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('clientId', ''))" 2>/dev/null || echo "")
+elif [ -n "$AZURE_CREDENTIALS" ]; then
+    SP_CLIENT_ID=$(echo "$AZURE_CREDENTIALS" | python3 -c "import sys, json; print(json.load(sys.stdin).get('clientId', ''))" 2>/dev/null || echo "")
+elif [ -n "$AZURE_CLIENT_ID" ]; then
+    SP_CLIENT_ID="$AZURE_CLIENT_ID"
+fi
+
+if [ -z "$SP_CLIENT_ID" ]; then
+    echo -e "${YELLOW}⚠️  No service principal credentials found. Skipping permissions check.${NC}"
+    echo "   To enable: create .azure-credentials.json or set AZURE_CLIENT_ID"
+    exit 0
+fi
+
+# Get service principal object ID
+SP_OBJECT_ID=$(az ad sp show --id "$SP_CLIENT_ID" --query id -o tsv 2>/dev/null || echo "")
+
+if [ -z "$SP_OBJECT_ID" ]; then
+    echo -e "${YELLOW}⚠️  Could not find service principal. Skipping permissions check.${NC}"
+    exit 0
+fi
+
+# Get subscription ID
+SUBSCRIPTION_ID=$(az account show --query id -o tsv 2>/dev/null)
+RG_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+
+# Check roles on resource group (if it exists)
+if az group show --name "$RESOURCE_GROUP" &>/dev/null 2>&1; then
+    ROLES=$(az role assignment list \
+        --assignee "$SP_OBJECT_ID" \
+        --scope "$RG_SCOPE" \
+        --query "[].roleDefinitionName" -o tsv 2>/dev/null || echo "")
+
+    HAS_OWNER=$(echo "$ROLES" | grep -c "Owner" || echo "0")
+    HAS_UAA=$(echo "$ROLES" | grep -c "User Access Administrator" || echo "0")
+
+    if [ "$HAS_OWNER" -eq 0 ] && [ "$HAS_UAA" -eq 0 ]; then
+        echo -e "${RED}"
+        echo "╔════════════════════════════════════════════════════════════╗"
+        echo "║  ⚠️  WARNING: Service Principal Missing Permissions        ║"
+        echo "╚════════════════════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        echo ""
+        echo "Your service principal needs 'Owner' or 'User Access Administrator'"
+        echo "role to assign permissions to the compute cluster."
+        echo ""
+        echo -e "${YELLOW}Run this to fix:${NC}"
+        echo ""
+        echo "  ./scripts/setup-azure-permissions.sh"
+        echo ""
+        echo "Or manually:"
+        echo ""
+        echo "  az role assignment create \\"
+        echo "    --assignee-object-id $SP_OBJECT_ID \\"
+        echo "    --assignee-principal-type ServicePrincipal \\"
+        echo "    --role Owner \\"
+        echo "    --scope $RG_SCOPE"
+        echo ""
+
+        read -p "Continue with push anyway? (y/N): " CONTINUE
+        if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
+            echo "Push cancelled. Run ./scripts/setup-azure-permissions.sh first."
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✅ Service principal has correct permissions${NC}"
+    fi
+else
+    echo -e "${GREEN}✅ Resource group doesn't exist yet (will be created by pipeline)${NC}"
+
+    # Check subscription-level permissions instead
+    SUB_ROLES=$(az role assignment list \
+        --assignee "$SP_OBJECT_ID" \
+        --scope "/subscriptions/$SUBSCRIPTION_ID" \
+        --query "[].roleDefinitionName" -o tsv 2>/dev/null || echo "")
+
+    HAS_OWNER=$(echo "$SUB_ROLES" | grep -c "Owner" || echo "0")
+    HAS_UAA=$(echo "$SUB_ROLES" | grep -c "User Access Administrator" || echo "0")
+    HAS_CONTRIBUTOR=$(echo "$SUB_ROLES" | grep -c "Contributor" || echo "0")
+
+    if [ "$HAS_OWNER" -eq 0 ] && [ "$HAS_CONTRIBUTOR" -eq 0 ]; then
+        echo -e "${YELLOW}⚠️  Service principal may not have permission to create resources${NC}"
+        echo "   Run ./scripts/setup-azure-permissions.sh to verify"
+    fi
+fi
+
+# Update check timestamp
+date +%s > "$CHECK_FILE"
+
+echo -e "${GREEN}✅ Pre-push check complete. Proceeding with push...${NC}"
+exit 0

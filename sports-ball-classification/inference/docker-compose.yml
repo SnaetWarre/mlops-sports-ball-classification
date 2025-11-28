@@ -5,7 +5,7 @@ services:
       - "8000:8000"
     environment:
       - PORT=8000
-      - MODEL_PATH=/app/model/sports-ball-cnn/model.keras
+      - MODEL_PATH=/app/model/sports-ball-classification/model.keras
       - DATABASE_URL=postgresql://sportsball:sportsball123@db:5432/sportsball_db
     volumes:
       - ./model:/app/model

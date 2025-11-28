@@ -55,6 +55,30 @@ Trigger the workflow manually with these actions:
 
 - `AZURE_CREDENTIALS`: Azure Service Principal credentials (JSON format)
 
+### Service Principal Permissions
+
+The service principal used in `AZURE_CREDENTIALS` must have the following roles:
+
+1. **Contributor** on the resource group (for creating resources)
+2. **User Access Administrator** OR **Owner** on the resource group (for assigning roles to the compute cluster's managed identity)
+
+To grant the necessary permissions, run:
+
+```bash
+# Get your service principal's object ID (from AZURE_CREDENTIALS clientId)
+SP_APP_ID="<your-service-principal-client-id>"
+SP_OBJECT_ID=$(az ad sp show --id $SP_APP_ID --query id -o tsv)
+
+# Assign Owner role (includes both Contributor and User Access Administrator)
+az role assignment create \
+  --assignee-object-id $SP_OBJECT_ID \
+  --assignee-principal-type ServicePrincipal \
+  --role "Owner" \
+  --scope "/subscriptions/<subscription-id>/resourceGroups/mlops-examen-rg"
+```
+
+**Why is this needed?** The pipeline automatically assigns the "AzureML Data Scientist" role to the compute cluster's managed identity, allowing it to register models. Without "Owner" or "User Access Administrator", this role assignment will fail.
+
 ### Environment Variables
 
 ```yaml
@@ -62,7 +86,7 @@ RESOURCE_GROUP: mlops-examen-rg
 WORKSPACE_NAME: mlops-sports-ball-ws
 LOCATION: westeurope
 COMPUTE_CLUSTER_NAME: sports-ball-cluster
-MODEL_NAME: sports-ball-cnn
+MODEL_NAME: sports-ball-classification
 ```
 
 ## 🖥️ Self-Hosted Runner
@@ -103,14 +127,33 @@ After deployment, the API is available at:
 
 ## 🚀 Quick Start
 
-1. Ensure Azure credentials are set in repository secrets
-2. Start your self-hosted runner locally
-3. Trigger the workflow:
+1. **Set up Azure Service Principal** with Owner permissions (see above)
+2. **Add secrets** to your GitHub repository:
+   - `AZURE_CREDENTIALS`: Your service principal JSON
+3. **Start your self-hosted runner** locally:
+   ```bash
+   cd actions-runner && ./run.sh
+   ```
+4. **Trigger the workflow**:
    ```bash
    gh workflow run mlops-pipeline.yml --field action=full-pipeline --field epochs=10
    ```
-4. Monitor progress in GitHub Actions tab
-5. Access API at http://localhost:8000/docs when complete
+5. Monitor progress in GitHub Actions tab
+6. Access API at http://localhost:8000/docs when complete
+
+## ⚠️ Troubleshooting
+
+### "Model is not loaded on the server"
+- The model wasn't downloaded or is in the wrong location
+- Check `sports-ball-classification/inference/model/sports-ball-classification/model.keras` exists
+- Re-run with `action=download-model` then `action=deploy-inference`
+
+### Role assignment failed
+- Your service principal needs "Owner" or "User Access Administrator" role
+- See "Service Principal Permissions" section above
+
+### TensorFlow version mismatch
+- Ensure `inference/requirements.txt` has `tensorflow==2.15.0` (must match training)
 
 ## 📁 Project Structure
 

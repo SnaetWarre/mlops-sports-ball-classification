@@ -99,6 +99,7 @@ secrets/
 *.key
 credentials.json
 service-principal.json
+.azure-credentials.json
 
 # Large data files - commented out to allow training data to be committed
 # data/*/*.jpg
