@@ -1,6 +1,6 @@
 $schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
 name: aml-register-cli
-version: 0.4.0
+version: 0.5.0
 description: Environment for model registration component with Azure CLI
 image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
 conda_file: conda.yaml

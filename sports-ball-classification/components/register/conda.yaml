@@ -6,3 +6,4 @@ dependencies:
   - pip=24.0
   - pip:
       - azure-cli>=2.50.0
+      - azure-ai-ml>=1.12.0
