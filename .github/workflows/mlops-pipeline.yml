@@ -173,13 +173,10 @@ jobs:
             az ml environment create -f environment/training.yaml || echo "⚠️ May already exist"
           fi
 
-          # Register environment - version 0.4.0 with Azure CLI via pip
-          if az ml environment show --name aml-register-cli --version 0.4.0 &>/dev/null 2>&1; then
-            echo "✅ Register environment v0.4.0 exists"
-          else
-            echo "🔨 Creating register environment v0.4.0..."
-            az ml environment create -f components/register/environment.yaml || echo "⚠️ May already exist"
-          fi
+          # Register environment - version 1.0.0 with Azure ML SDK (no azure-cli dependency)
+          # Always recreate to ensure latest version is used
+          echo "🔨 Creating/updating register environment v1.0.0..."
+          az ml environment create -f components/register/environment.yaml || echo "⚠️ May already exist"
 
           echo "✅ All environments ready"
 
