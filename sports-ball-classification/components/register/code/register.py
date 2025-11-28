@@ -1,16 +1,12 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 
-
-def run_command(command: list[str], check: bool = True) -> tuple[int, str, str]:
-    """Run a command and return exit code, stdout, and stderr."""
-    print(f"Running: {' '.join(command)}")
-    result = subprocess.run(command, capture_output=True, text=True)
-    return result.returncode, result.stdout, result.stderr
+from azure.ai.ml import MLClient
+from azure.ai.ml.entities import Model
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 
 
 def main():
@@ -36,7 +32,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("Model Registration (Azure CLI)")
+    print("Model Registration (Azure ML SDK)")
     print("=" * 60)
     print(f"Model name: {args.model_name}")
     print(f"Model path: {args.model_path}")
@@ -85,136 +81,103 @@ def main():
     print(f"Model version: {timestamp_version}")
     print()
 
-    # Check if az CLI is available
-    exit_code, stdout, stderr = run_command(["az", "--version"])
-    if exit_code != 0:
-        print("ERROR: Azure CLI not available")
-        print(stderr)
-        sys.exit(1)
-    print("Azure CLI is available")
+    # Authenticate using managed identity or default credentials
+    print("Authenticating with Azure...")
+    try:
+        # Try ManagedIdentityCredential first (for compute clusters)
+        credential = ManagedIdentityCredential()
+        # Test the credential
+        credential.get_token("https://management.azure.com/.default")
+        print("Using Managed Identity authentication")
+    except Exception as e:
+        print(f"Managed Identity not available: {e}")
+        print("Falling back to DefaultAzureCredential...")
+        credential = DefaultAzureCredential()
     print()
 
-    # Check if ml extension is installed
-    exit_code, stdout, stderr = run_command(["az", "extension", "show", "--name", "ml"])
-    if exit_code != 0:
-        print("Installing Azure ML CLI extension...")
-        exit_code, stdout, stderr = run_command(
-            ["az", "extension", "add", "--name", "ml", "-y"]
+    # Create ML Client
+    print("Creating Azure ML client...")
+    try:
+        ml_client = MLClient(
+            credential=credential,
+            subscription_id=subscription_id,
+            resource_group_name=resource_group,
+            workspace_name=workspace_name,
         )
-        if exit_code != 0:
-            print(f"ERROR: Failed to install ml extension: {stderr}")
-            sys.exit(1)
-    print("Azure ML CLI extension is available")
+        print("Azure ML client created successfully")
+    except Exception as e:
+        print(f"ERROR: Failed to create ML client: {e}")
+        sys.exit(1)
     print()
 
-    # Set defaults
-    print("Setting Azure CLI defaults...")
-    run_command(
-        [
-            "az",
-            "configure",
-            "--defaults",
-            f"group={resource_group}",
-            f"workspace={workspace_name}",
-        ]
+    # Create model description
+    description = (
+        f"Sports Ball Classification CNN model - "
+        f"Run ID: {run_id} - "
+        f"Registered: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    # Create Model object
+    print("Creating model object...")
+    model = Model(
+        name=args.model_name,
+        version=timestamp_version,
+        path=args.model_path,
+        type=args.model_type,
+        description=description,
+        tags={
+            "run_id": run_id,
+            "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "framework": "tensorflow",
+        },
     )
     print()
 
-    # Build the model registration command
-    description = f"Sports Ball Classification CNN model - Run ID: {run_id} - Registered: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-
-    register_command = [
-        "az",
-        "ml",
-        "model",
-        "create",
-        "--name",
-        args.model_name,
-        "--version",
-        timestamp_version,
-        "--path",
-        args.model_path,
-        "--type",
-        args.model_type,
-        "--description",
-        description,
-        "--resource-group",
-        resource_group,
-        "--workspace-name",
-        workspace_name,
-    ]
-
+    # Register the model
     print("Registering model...")
-    exit_code, stdout, stderr = run_command(register_command)
+    try:
+        registered_model = ml_client.models.create_or_update(model)
+        print("Model registered successfully!")
+    except Exception as e:
+        print(f"ERROR: Model registration failed: {e}")
 
-    if exit_code != 0:
-        print()
-        print("ERROR: Model registration failed!")
-        print(f"Exit code: {exit_code}")
-        print(f"Stdout: {stdout}")
-        print(f"Stderr: {stderr}")
-
-        # Try without specifying version (let Azure ML auto-generate)
+        # Retry without explicit version
         print()
         print("Retrying without explicit version...")
-        register_command_retry = [
-            "az",
-            "ml",
-            "model",
-            "create",
-            "--name",
-            args.model_name,
-            "--path",
-            args.model_path,
-            "--type",
-            args.model_type,
-            "--description",
-            description,
-            "--resource-group",
-            resource_group,
-            "--workspace-name",
-            workspace_name,
-        ]
-
-        exit_code, stdout, stderr = run_command(register_command_retry)
-
-        if exit_code != 0:
-            print()
-            print("ERROR: Retry also failed!")
-            print(f"Stderr: {stderr}")
+        try:
+            model_retry = Model(
+                name=args.model_name,
+                path=args.model_path,
+                type=args.model_type,
+                description=description,
+                tags={
+                    "run_id": run_id,
+                    "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "framework": "tensorflow",
+                },
+            )
+            registered_model = ml_client.models.create_or_update(model_retry)
+            print("Model registered successfully on retry!")
+        except Exception as retry_error:
+            print(f"ERROR: Retry also failed: {retry_error}")
             sys.exit(1)
-
-    print()
-    print("Model registered successfully!")
-    print(f"Output: {stdout}")
-
-    # Parse the output to get model details
-    try:
-        model_info = json.loads(stdout) if stdout.strip() else {}
-        model_version = model_info.get("version", timestamp_version)
-        model_id = model_info.get("id", f"azureml:{args.model_name}:{model_version}")
-        model_name = model_info.get("name", args.model_name)
-    except json.JSONDecodeError:
-        model_version = timestamp_version
-        model_id = f"azureml:{args.model_name}:{model_version}"
-        model_name = args.model_name
 
     print()
     print("=" * 60)
     print("Registration Complete!")
     print("=" * 60)
-    print(f"Model name: {model_name}")
-    print(f"Model version: {model_version}")
-    print(f"Model ID: {model_id}")
+    print(f"Model name: {registered_model.name}")
+    print(f"Model version: {registered_model.version}")
+    print(f"Model ID: {registered_model.id}")
     print()
 
     # Save registration details to output folder
     os.makedirs(args.registration_details, exist_ok=True)
 
     registration_info = {
-        "name": model_name,
-        "version": str(model_version),
-        "id": model_id,
+        "name": registered_model.name,
+        "version": str(registered_model.version),
+        "id": registered_model.id,
         "type": args.model_type,
         "run_id": run_id,
         "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
