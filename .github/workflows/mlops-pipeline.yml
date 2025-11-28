@@ -39,7 +39,7 @@ env:
   WORKSPACE_NAME: mlops-sports-ball-ws
   LOCATION: westeurope
   COMPUTE_CLUSTER_NAME: sports-ball-cluster
-  MODEL_NAME: sports-ball-cnn
+  MODEL_NAME: sports-ball-classification
 
 jobs:
   # ============================================================================
