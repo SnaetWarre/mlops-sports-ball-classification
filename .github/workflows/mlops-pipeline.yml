@@ -133,23 +133,24 @@ jobs:
             echo "📌 Compute identity principal ID: $IDENTITY_PRINCIPAL_ID"
             echo "📌 Workspace ID: $WORKSPACE_ID"
 
-            # Check if role assignment already exists
+            # Check if AzureML Data Scientist role assignment already exists
+            # This role is required for ML data-plane operations (model registration, etc.)
             EXISTING_ROLE=$(az role assignment list \
               --assignee "$IDENTITY_PRINCIPAL_ID" \
               --scope "$WORKSPACE_ID" \
-              --role "Contributor" \
+              --role "AzureML Data Scientist" \
               --query "[0].id" -o tsv 2>/dev/null || echo "")
 
             if [ -n "$EXISTING_ROLE" ]; then
-              echo "✅ Contributor role already assigned to compute identity"
+              echo "✅ AzureML Data Scientist role already assigned to compute identity"
             else
-              echo "🔨 Assigning Contributor role to compute identity..."
+              echo "🔨 Assigning AzureML Data Scientist role to compute identity..."
               az role assignment create \
                 --assignee-object-id "$IDENTITY_PRINCIPAL_ID" \
                 --assignee-principal-type ServicePrincipal \
-                --role "Contributor" \
+                --role "AzureML Data Scientist" \
                 --scope "$WORKSPACE_ID" || echo "⚠️ Role assignment failed (may already exist or lack permissions)"
-              echo "✅ Role assignment complete"
+              echo "✅ AzureML Data Scientist role assignment complete"
             fi
           fi
 
