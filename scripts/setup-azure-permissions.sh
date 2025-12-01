@@ -8,7 +8,7 @@
 # Run this script once before your first pipeline run, or after creating a new
 # Azure environment.
 #
-# Usage: ./scripts/setup-azure-permissions.sh
+# Usage: ./scripts/setup-azure-permissions.sh [--auto-approve]
 # =============================================================================
 
 set -e
@@ -24,6 +24,17 @@ NC='\033[0m' # No Color
 RESOURCE_GROUP="${RESOURCE_GROUP:-mlops-examen-rg}"
 LOCATION="${LOCATION:-westeurope}"
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-}"
+AUTO_APPROVE=false
+
+# Parse arguments
+for arg in "$@"; do
+    case $arg in
+        --auto-approve)
+            AUTO_APPROVE=true
+            shift
+            ;;
+    esac
+done
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -41,6 +52,11 @@ fi
 # Check if logged in
 echo "🔍 Checking Azure CLI login status..."
 if ! az account show &> /dev/null; then
+    if [ "$AUTO_APPROVE" = true ]; then
+        echo -e "${RED}❌ Not logged into Azure CLI and running in auto-approve mode.${NC}"
+        echo "   Please ensure the runner is logged in (az login) before running this pipeline."
+        exit 1
+    fi
     echo -e "${YELLOW}⚠️  Not logged into Azure CLI. Please log in...${NC}"
     az login
 fi
@@ -71,6 +87,11 @@ elif [ -n "$AZURE_CREDENTIALS" ]; then
 fi
 
 if [ -z "$SP_CLIENT_ID" ]; then
+    if [ "$AUTO_APPROVE" = true ]; then
+        echo -e "${RED}❌ No service principal credentials found and running in auto-approve mode.${NC}"
+        exit 1
+    fi
+
     echo -e "${YELLOW}"
     echo "⚠️  No service principal credentials found."
     echo ""
@@ -155,13 +176,20 @@ if [ "$NEEDS_ROLE" = true ]; then
     echo "The service principal needs additional permissions to:"
     echo "  - Assign 'AzureML Data Scientist' role to compute cluster identity"
     echo ""
-    echo "Options:"
-    echo "  1. Assign 'Owner' role on resource group (recommended)"
-    echo "  2. Assign 'User Access Administrator' role on resource group"
-    echo "  3. Skip (pipeline may fail on role assignment)"
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    read -p "Choose option (1/2/3): " CHOICE
+    
+    CHOICE=""
+    if [ "$AUTO_APPROVE" = true ]; then
+        echo "🤖 Auto-approving 'Owner' role assignment..."
+        CHOICE="1"
+    else
+        echo "Options:"
+        echo "  1. Assign 'Owner' role on resource group (recommended)"
+        echo "  2. Assign 'User Access Administrator' role on resource group"
+        echo "  3. Skip (pipeline may fail on role assignment)"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        read -p "Choose option (1/2/3): " CHOICE
+    fi
 
     case $CHOICE in
         1)
