@@ -167,5 +167,4 @@ After deployment, the API is available at:
 │   ├── inference/             # FastAPI + Docker
 │   ├── kubernetes/            # K8s deployment manifests
 │   └── pipelines/             # Azure ML pipeline definition
-└── assignment/                 # Reference material
 ```
