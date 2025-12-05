@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sports-ball-classification-deployment
+  name: sports-ball-api-deployment
   labels:
-    app: sports-ball-classification
+    app: sports-ball-api
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: sports-ball-classification
+      app: sports-ball-api
   template:
     metadata:
       labels:
-        app: sports-ball-classification
+        app: sports-ball-api
     spec:
       containers:
         - name: sports-ball-api
@@ -21,7 +21,7 @@ spec:
             - containerPort: 8000
           env:
             - name: MODEL_PATH
-              value: /app/model/sports-ball-cnn/model.keras
+              value: /app/model/sports-ball-classification/model.keras
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -49,24 +49,101 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           volumeMounts:
+            - name: model-storage
+              mountPath: /app/model
             - name: db-data
               mountPath: /app/data
       volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: sports-ball-model-pvc
         - name: db-data
           persistentVolumeClaim:
             claimName: sports-ball-db-pvc
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sports-ball-dashboard-deployment
+  labels:
+    app: sports-ball-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sports-ball-dashboard
+  template:
+    metadata:
+      labels:
+        app: sports-ball-dashboard
+    spec:
+      containers:
+        - name: sports-ball-dashboard
+          image: ghcr.io/warresnaet/sports-ball-classification-dashboard:latest
+          ports:
+            - containerPort: 8501
+          env:
+            - name: MODEL_PATH
+              value: /app/model/sports-ball-classification/model.keras
+            - name: STREAMLIT_SERVER_PORT
+              value: "8501"
+            - name: STREAMLIT_SERVER_ADDRESS
+              value: "0.0.0.0"
+            - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+              value: "false"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: model-storage
+              mountPath: /app/model
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: sports-ball-model-pvc
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: sports-ball-classification-service
+  name: sports-ball-api-service
 spec:
   type: LoadBalancer
   selector:
-    app: sports-ball-classification
+    app: sports-ball-api
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8000
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sports-ball-dashboard-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: sports-ball-dashboard
+  ports:
+    - name: http
+      port: 8501
+      targetPort: 8501
       protocol: TCP
 ---
 apiVersion: v1
@@ -87,3 +164,14 @@ spec:
   resources:
     requests:
       storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sports-ball-model-pvc
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 500Mi

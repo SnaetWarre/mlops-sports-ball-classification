@@ -693,15 +693,27 @@ jobs:
           echo "⏳ Waiting for services to start..."
           sleep 15
 
-      - name: Health Check
+      - name: Health Check - API
         run: |
-          echo "🏥 Running health check..."
+          echo "🏥 Running API health check..."
           for i in {1..12}; do
             if curl -s http://localhost:8000/health | grep -q "healthy"; then
               echo "✅ API is healthy!"
               break
             fi
             echo "   Waiting for API... (attempt $i/12)"
+            sleep 5
+          done
+
+      - name: Health Check - Dashboard
+        run: |
+          echo "🏥 Running Dashboard health check..."
+          for i in {1..12}; do
+            if curl -s http://localhost:8501/_stcore/health | grep -q "ok"; then
+              echo "✅ Dashboard is healthy!"
+              break
+            fi
+            echo "   Waiting for Dashboard... (attempt $i/12)"
             sleep 5
           done
 
@@ -733,6 +745,10 @@ jobs:
           echo "   • Predict:    http://localhost:8000/predict"
           echo "   • Categories: http://localhost:8000/categories"
           echo "   • Stats:      http://localhost:8000/stats"
+          echo ""
+          echo "🔥 Grad-CAM Dashboard:"
+          echo "   • Dashboard:  http://localhost:8501"
+          echo "   • Health:     http://localhost:8501/_stcore/health"
           echo ""
           echo "📊 Container status:"
           docker-compose ps
@@ -766,7 +782,14 @@ jobs:
   summary:
     name: 📋 Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [configure-permissions, setup-azure, train-model, download-model, deploy-inference]
+    needs:
+      [
+        configure-permissions,
+        setup-azure,
+        train-model,
+        download-model,
+        deploy-inference,
+      ]
     if: always() && github.event.inputs.action != 'cleanup'
 
     steps:
