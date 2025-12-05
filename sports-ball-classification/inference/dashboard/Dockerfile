@@ -3,13 +3,14 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install system dependencies for TensorFlow and image processing
+# Note: libgl1-mesa-glx is deprecated, use libgl1 instead
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libglib2.0-0 \
     libsm6 \
     libxrender1 \
     libxext6 \
-    libgl1-mesa-glx \
+    libgl1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
