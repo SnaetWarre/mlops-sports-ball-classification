@@ -12,9 +12,9 @@ from utils import BALL_CATEGORIES, buildModel, encodeLabels, getFeatures, getTar
 
 # Hyperparameters
 SEED = 42
-INITIAL_LEARNING_RATE = 0.01
+INITIAL_LEARNING_RATE = 0.001  # Lower LR for Adam
 BATCH_SIZE = 32
-PATIENCE = 11
+PATIENCE = 10
 MODEL_NAME = "sports-ball-cnn"
 
 
@@ -42,7 +42,7 @@ def main():
         "--epochs",
         type=int,
         dest="epochs",
-        default=10,
+        default=30,  # Increased from 10 to 30 for better convergence
         help="The number of epochs to train",
     )
     args = parser.parse_args()
@@ -87,10 +87,14 @@ def main():
     y_test = getTargets(testing_paths)
 
     print(f"\nData shapes:")
-    print(f"X_train: {X_train.shape}")
-    print(f"X_test: {X_test.shape}")
+    print(f"X_train: {X_train.shape}, dtype: {X_train.dtype}")
+    print(f"X_test: {X_test.shape}, dtype: {X_test.dtype}")
     print(f"y_train: {len(y_train)} labels")
     print(f"y_test: {len(y_test)} labels")
+
+    # Verify normalization
+    print(f"\nX_train value range: [{X_train.min():.4f}, {X_train.max():.4f}]")
+    print(f"X_test value range: [{X_test.min():.4f}, {X_test.max():.4f}]")
 
     # One-hot encode labels
     LABELS, y_train_encoded, y_test_encoded = encodeLabels(y_train, y_test)
@@ -115,30 +119,31 @@ def main():
     # Callbacks
     cb_save_best_model = keras.callbacks.ModelCheckpoint(
         filepath=model_path,
-        monitor="val_loss",
+        monitor="val_accuracy",  # Changed to monitor accuracy
         save_best_only=True,
         verbose=1,
     )
 
     cb_early_stop = keras.callbacks.EarlyStopping(
-        monitor="val_loss",
+        monitor="val_accuracy",  # Changed to monitor accuracy
         patience=PATIENCE,
         verbose=1,
         restore_best_weights=True,
+        mode="max",  # We want to maximize accuracy
     )
 
-    # Learning rate schedule
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=INITIAL_LEARNING_RATE,
-        decay_steps=MAX_EPOCHS,
-        decay_rate=0.5,
-        staircase=True,
+    # ReduceLROnPlateau - reduces learning rate when validation loss plateaus
+    cb_reduce_lr = keras.callbacks.ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6,
+        verbose=1,
     )
 
-    optimizer = tf.keras.optimizers.SGD(
-        learning_rate=lr_schedule,
-        momentum=0.0,
-        nesterov=False,
+    # Use Adam optimizer - much better for CNN training
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=INITIAL_LEARNING_RATE,
     )
 
     # Build model for 15 classes (or however many we have)
@@ -154,29 +159,44 @@ def main():
     model.summary()
 
     # Data augmentation for training
+    # More conservative augmentation to avoid distorting ball shapes too much
     aug = ImageDataGenerator(
-        rotation_range=30,
-        width_shift_range=0.1,
-        height_shift_range=0.1,
-        shear_range=0.2,
-        zoom_range=0.2,
+        rotation_range=20,
+        width_shift_range=0.15,
+        height_shift_range=0.15,
+        shear_range=0.15,
+        zoom_range=0.15,
         horizontal_flip=True,
         fill_mode="nearest",
     )
+
+    # Calculate steps per epoch
+    steps_per_epoch = max(1, len(X_train) // BATCH_SIZE)
+    print(f"\nSteps per epoch: {steps_per_epoch}")
 
     # Train the model
     print("\n[INFO] Training the network...")
     history = model.fit(
         aug.flow(X_train, y_train_encoded, batch_size=BATCH_SIZE),
         validation_data=(X_test, y_test_encoded),
-        steps_per_epoch=len(X_train) // BATCH_SIZE,
+        steps_per_epoch=steps_per_epoch,
         epochs=MAX_EPOCHS,
-        callbacks=[cb_save_best_model, cb_early_stop],
+        callbacks=[cb_save_best_model, cb_early_stop, cb_reduce_lr],
     )
 
     # Evaluate the model
     print("\n[INFO] Evaluating network...")
     predictions = model.predict(X_test, batch_size=32)
+
+    # Print final metrics
+    final_train_acc = history.history["accuracy"][-1]
+    final_val_acc = history.history["val_accuracy"][-1]
+    best_val_acc = max(history.history["val_accuracy"])
+
+    print(f"\n=== Training Results ===")
+    print(f"Final training accuracy: {final_train_acc * 100:.2f}%")
+    print(f"Final validation accuracy: {final_val_acc * 100:.2f}%")
+    print(f"Best validation accuracy: {best_val_acc * 100:.2f}%")
 
     print("\nClassification Report:")
     print(

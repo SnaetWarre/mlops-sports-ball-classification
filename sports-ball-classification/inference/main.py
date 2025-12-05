@@ -198,8 +198,10 @@ async def predict_image(
         original_image = Image.open(img.file).convert("RGB")
         original_image = original_image.resize((64, 64))
 
-        # Convert to numpy array (raw pixel values, not normalized)
+        # Convert to numpy array and normalize to [0, 1] range
+        # CRITICAL: Must match training normalization!
         img_array = np.array(original_image, dtype=np.float32)
+        img_array = img_array / 255.0  # Normalize to [0, 1]
         img_array = np.expand_dims(img_array, axis=0)
 
         # Make prediction

@@ -7,7 +7,7 @@ experiment_name: sports-ball-classification
 
 inputs:
   train_test_split_percentage: 20
-  epochs: 10
+  epochs: 30
 
 outputs:
   registration_details:

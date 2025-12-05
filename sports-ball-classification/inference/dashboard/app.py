@@ -87,8 +87,10 @@ def preprocess_image(image: Image.Image, target_size=(64, 64)) -> np.ndarray:
     """Preprocess image for model prediction."""
     # Resize to model's expected input size
     image = image.resize(target_size)
-    # Convert to numpy array
+    # Convert to numpy array and normalize to [0, 1] range
+    # CRITICAL: Must match training normalization!
     img_array = np.array(image, dtype=np.float32)
+    img_array = img_array / 255.0  # Normalize to [0, 1]
     # Add batch dimension
     img_array = np.expand_dims(img_array, axis=0)
     return img_array

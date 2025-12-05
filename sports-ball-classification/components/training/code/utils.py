@@ -16,6 +16,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.utils import to_categorical
 
 # Sports ball categories (15 classes)
+# Order matters for label matching - longer names first to avoid partial matches
 BALL_CATEGORIES = [
     "american_football",
     "baseball",
@@ -34,36 +35,64 @@ BALL_CATEGORIES = [
     "volleyball",
 ]
 
+# Sorted by length (longest first) to avoid partial matching issues
+# e.g., "tennis" matching before "table_tennis"
+BALL_CATEGORIES_BY_LENGTH = sorted(BALL_CATEGORIES, key=len, reverse=True)
+
 
 def getTargets(filepaths: List[str]) -> List[str]:
     """
     Extract labels from file paths.
     Assumes filename format: <ball_type>_<number>.jpg
-    e.g., 'tennis_ball_123.jpg' -> 'tennis'
-          'american_football_45.jpg' -> 'american'
+    e.g., 'tennis_ball_123.jpg' -> 'tennis_ball'
+          'american_football_45.jpg' -> 'american_football'
+          'basketball_99.jpg' -> 'basketball'
 
-    We need to handle multi-word ball types like 'american_football', 'hockey_puck', etc.
+    Handles multi-word ball types like 'american_football', 'table_tennis_ball', etc.
     """
     labels = []
     for fp in filepaths:
         filename = fp.split("/")[-1]  # Get only the filename
         # Remove extension
-        name_without_ext = filename.rsplit(".", 1)[0]
+        name_without_ext = filename.rsplit(".", 1)[0].lower()
 
-        # Find which ball category this belongs to by checking prefixes
+        # Find which ball category this belongs to
+        # Check longest names first to avoid partial matches
         found_label = None
-        for category in BALL_CATEGORIES:
-            # Check if filename starts with the category name (before the number)
-            if name_without_ext.startswith(
-                category.replace("_ball", "").replace("_puck", "")
+        for category in BALL_CATEGORIES_BY_LENGTH:
+            # Check if filename starts with the category name
+            # The category should be followed by underscore and a number
+            if (
+                name_without_ext.startswith(category + "_")
+                or name_without_ext == category
             ):
                 found_label = category
                 break
+            # Also check without _ball or _puck suffix for flexibility
+            category_base = category.replace("_ball", "").replace("_puck", "")
+            if name_without_ext.startswith(category_base + "_"):
+                # Verify this is actually the right category
+                # by checking if the next part is a number
+                remainder = name_without_ext[len(category_base) + 1 :]
+                # If remainder starts with a digit, this is the match
+                if remainder and remainder.split("_")[0].isdigit():
+                    found_label = category
+                    break
 
         if found_label is None:
-            # Fallback: use the part before the last underscore and number
+            # Fallback: try to find any category name in the filename
+            for category in BALL_CATEGORIES_BY_LENGTH:
+                if category in name_without_ext:
+                    found_label = category
+                    break
+
+        if found_label is None:
+            # Last resort fallback
             parts = name_without_ext.rsplit("_", 1)
             found_label = parts[0] if len(parts) > 1 else name_without_ext
+            print(
+                f"WARNING: Could not match '{filename}' to known category, using: {found_label}"
+            )
 
         labels.append(found_label)
 
@@ -86,20 +115,38 @@ def encodeLabels(
     LABELS = label_encoder.classes_
     print(f"Labels: {LABELS}")
     print(f"Encoded values: {label_encoder.transform(LABELS)}")
+    print(f"Number of classes: {len(LABELS)}")
+
+    # Print label distribution
+    unique, counts = np.unique(y_train, return_counts=True)
+    print("\nTraining label distribution:")
+    for label, count in zip(unique, counts):
+        print(f"  {label}: {count}")
 
     return LABELS, y_train_1h, y_test_1h
 
 
 def getFeatures(filepaths: List[str]) -> np.ndarray:
     """
-    Load images from file paths and return as numpy array.
+    Load images from file paths and return as normalized numpy array.
+
+    IMPORTANT: Normalizes pixel values to [0, 1] range for proper training!
     """
     images = []
     for imagePath in filepaths:
         image = Image.open(imagePath).convert("RGB")
-        image = np.array(image)
+        image = np.array(image, dtype=np.float32)
+        # CRITICAL: Normalize to [0, 1] range
+        image = image / 255.0
         images.append(image)
-    return np.array(images)
+
+    images_array = np.array(images)
+    print(
+        f"Loaded {len(images)} images, shape: {images_array.shape}, "
+        f"dtype: {images_array.dtype}, range: [{images_array.min():.2f}, {images_array.max():.2f}]"
+    )
+
+    return images_array
 
 
 def buildModel(inputShape: tuple, classes: int) -> Sequential:
