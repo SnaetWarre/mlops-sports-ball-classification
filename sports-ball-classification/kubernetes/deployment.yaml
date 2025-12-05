@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: sports-ball-api
-          image: ghcr.io/YOUR_USERNAME/sports-ball-classification-api:latest
+          image: ghcr.io/warresnaet/sports-ball-classification-api:latest
           ports:
             - containerPort: 8000
           env:
@@ -48,6 +48,13 @@ spec:
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 5
+          volumeMounts:
+            - name: db-data
+              mountPath: /app/data
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: sports-ball-db-pvc
 ---
 apiVersion: v1
 kind: Service
