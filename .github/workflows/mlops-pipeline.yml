@@ -396,7 +396,7 @@ jobs:
 
           JOB_NAME=$(az ml job create \
             -f pipelines/sports-ball-classification.yaml \
-            --set inputs.epochs=${{ github.event.inputs.epochs || '10' }} \
+            --set inputs.epochs=${{ github.event.inputs.epochs || '30' }} \
             --query name -o tsv)
 
           echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
@@ -407,7 +407,7 @@ jobs:
           echo "╚════════════════════════════════════════════════════════════╝"
           echo ""
           echo "Job Name: $JOB_NAME"
-          echo "Epochs: ${{ github.event.inputs.epochs || '10' }}"
+          echo "Epochs: ${{ github.event.inputs.epochs || '30' }}"
 
       - name: Wait for Training Completion
         id: wait
