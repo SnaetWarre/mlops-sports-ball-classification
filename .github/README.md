@@ -2,6 +2,13 @@
 
 This repository contains a unified MLOps pipeline that automates the entire machine learning lifecycle for sports ball image classification.
 
+## ✨ Key Features
+
+- **Semantic Versioning**: Docker images are tagged with version numbers (e.g., `1.0.42-a1b2c3d`) for full traceability
+- **Discord Notifications**: Real-time deployment status updates sent to Discord
+- **Health Check Integration**: Automated health checks with pass/fail reporting
+- **Full MLOps Pipeline**: From training to deployment in a single workflow
+
 ## 🔄 Unified Workflow
 
 The single workflow `mlops-pipeline.yml` handles everything:
@@ -54,6 +61,7 @@ Trigger the workflow manually with these actions:
 ### Required Secrets
 
 - `AZURE_CREDENTIALS`: Azure Service Principal credentials (JSON format)
+- `DISCORD_WEBHOOK`: Discord webhook URL for notifications (optional but recommended)
 
 ### Service Principal Permissions
 
@@ -154,6 +162,45 @@ After deployment, the API is available at:
 
 ### TensorFlow version mismatch
 - Ensure `inference/requirements.txt` has `tensorflow==2.15.0` (must match training)
+
+## 🏷️ Semantic Versioning
+
+Docker images are automatically tagged with semantic versions for full traceability:
+
+| Tag Format | Example | Description |
+|------------|---------|-------------|
+| `1.0.<run_number>-<sha>` | `1.0.42-a1b2c3d` | Full version with git SHA |
+| `latest` | `latest` | Always points to most recent build |
+| `<full_sha>` | `abc123...` | Full git commit SHA |
+
+This enables:
+- **Rollback**: Easily revert to any previous version
+- **Traceability**: Know exactly which code is running in production
+- **Debugging**: Match production issues to specific commits
+
+## 📢 Discord Notifications
+
+The pipeline sends rich Discord notifications with deployment status:
+
+### Success Notification
+- ✅ Version deployed
+- 🏥 Health check status (API & Dashboard)
+- 🧪 Test prediction result with confidence score
+- 📡 Links to API docs and dashboard
+
+### Failure Notification
+- ❌ Which component failed
+- 🔗 Direct link to GitHub Actions logs for debugging
+
+### Pipeline Summary
+- 📊 Status of all pipeline stages
+- 🔗 Links to Azure ML Studio and local API
+
+### Setup Discord Webhook
+
+1. In Discord, go to Server Settings → Integrations → Webhooks
+2. Create a new webhook and copy the URL
+3. Add it as a GitHub secret named `DISCORD_WEBHOOK`
 
 ## 📁 Project Structure
 

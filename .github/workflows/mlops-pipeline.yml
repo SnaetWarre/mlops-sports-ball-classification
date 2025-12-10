@@ -40,6 +40,11 @@ env:
   LOCATION: westeurope
   COMPUTE_CLUSTER_NAME: sports-ball-cluster
   MODEL_NAME: sports-ball-classification
+  # Semantic versioning for Docker images
+  IMAGE_VERSION: 1.0.${{ github.run_number }}
+  IMAGE_TAG_SHA: ${{ github.sha }}
+  # Discord webhook stored in GitHub Secrets for security
+  DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
 jobs:
   # ============================================================================
@@ -594,9 +599,23 @@ jobs:
       (github.event.inputs.action == 'full-pipeline' || github.event.inputs.action == 'deploy-inference' || github.event.inputs.action == '') &&
       (needs.download-model.outputs.model_downloaded == 'true' || github.event.inputs.action == 'deploy-inference')
 
+    outputs:
+      api_healthy: ${{ steps.health-check-api.outputs.healthy }}
+      dashboard_healthy: ${{ steps.health-check-dashboard.outputs.healthy }}
+      image_version: ${{ steps.set-version.outputs.version }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set Image Version
+        id: set-version
+        run: |
+          VERSION="${{ env.IMAGE_VERSION }}"
+          SHA_SHORT=$(echo "${{ env.IMAGE_TAG_SHA }}" | cut -c1-7)
+          FULL_TAG="${VERSION}-${SHA_SHORT}"
+          echo "version=${FULL_TAG}" >> $GITHUB_OUTPUT
+          echo "📌 Image version: ${FULL_TAG}"
 
       - name: Display Deployment Info
         run: |
@@ -671,14 +690,36 @@ jobs:
         working-directory: sports-ball-classification/inference
         run: |
           echo "🛑 Stopping existing containers..."
+          # Tag current images as 'previous' for potential rollback
+          docker tag sports-ball-classification-inference-api:latest sports-ball-classification-inference-api:previous 2>/dev/null || true
+          docker tag sports-ball-classification-inference-dashboard:latest sports-ball-classification-inference-dashboard:previous 2>/dev/null || true
           docker-compose down 2>/dev/null || true
           echo "✅ Containers stopped"
 
-      - name: Build Docker Images
+      - name: Build Docker Images with Semantic Version
         working-directory: sports-ball-classification/inference
         run: |
-          echo "🔨 Building Docker images..."
-          docker-compose build
+          VERSION="${{ steps.set-version.outputs.version }}"
+          echo "🔨 Building Docker images with version: ${VERSION}..."
+
+          # Build API image with version tags
+          docker build -t sports-ball-classification-api:${VERSION} \
+                       -t sports-ball-classification-api:latest \
+                       -t sports-ball-classification-api:${{ env.IMAGE_TAG_SHA }} \
+                       .
+
+          # Build Dashboard image with version tags
+          docker build -t sports-ball-classification-dashboard:${VERSION} \
+                       -t sports-ball-classification-dashboard:latest \
+                       -t sports-ball-classification-dashboard:${{ env.IMAGE_TAG_SHA }} \
+                       ./dashboard
+
+          echo ""
+          echo "📦 Built images:"
+          echo "   • sports-ball-classification-api:${VERSION}"
+          echo "   • sports-ball-classification-api:latest"
+          echo "   • sports-ball-classification-dashboard:${VERSION}"
+          echo "   • sports-ball-classification-dashboard:latest"
           echo "✅ Build complete"
 
       - name: Start Containers
@@ -694,30 +735,51 @@ jobs:
           sleep 15
 
       - name: Health Check - API
+        id: health-check-api
         run: |
           echo "🏥 Running API health check..."
+          API_HEALTHY=false
           for i in {1..12}; do
             if curl -s http://localhost:8000/health | grep -q "healthy"; then
               echo "✅ API is healthy!"
+              API_HEALTHY=true
               break
             fi
             echo "   Waiting for API... (attempt $i/12)"
             sleep 5
           done
 
+          if [ "$API_HEALTHY" = true ]; then
+            echo "healthy=true" >> $GITHUB_OUTPUT
+          else
+            echo "healthy=false" >> $GITHUB_OUTPUT
+            echo "❌ API health check failed!"
+          fi
+
       - name: Health Check - Dashboard
+        id: health-check-dashboard
         run: |
           echo "🏥 Running Dashboard health check..."
+          DASHBOARD_HEALTHY=false
           for i in {1..12}; do
             if curl -s http://localhost:8501/_stcore/health | grep -q "ok"; then
               echo "✅ Dashboard is healthy!"
+              DASHBOARD_HEALTHY=true
               break
             fi
             echo "   Waiting for Dashboard... (attempt $i/12)"
             sleep 5
           done
 
+          if [ "$DASHBOARD_HEALTHY" = true ]; then
+            echo "healthy=true" >> $GITHUB_OUTPUT
+          else
+            echo "healthy=false" >> $GITHUB_OUTPUT
+            echo "❌ Dashboard health check failed!"
+          fi
+
       - name: Test Prediction
+        id: test-prediction
         run: |
           echo "🧪 Testing prediction endpoint..."
 
@@ -729,6 +791,12 @@ jobs:
               -H "Content-Type: multipart/form-data" \
               -F "img=@$SAMPLE_IMAGE")
             echo "   Result: $RESULT"
+
+            # Extract prediction for Discord notification
+            PREDICTED_LABEL=$(echo "$RESULT" | python3 -c "import sys, json; print(json.load(sys.stdin).get('predicted_label', 'unknown'))" 2>/dev/null || echo "unknown")
+            CONFIDENCE=$(echo "$RESULT" | python3 -c "import sys, json; print(f\"{json.load(sys.stdin).get('confidence', 0)*100:.1f}\")" 2>/dev/null || echo "0")
+            echo "prediction_label=${PREDICTED_LABEL}" >> $GITHUB_OUTPUT
+            echo "prediction_confidence=${CONFIDENCE}" >> $GITHUB_OUTPUT
           fi
 
       - name: Deployment Summary
@@ -738,6 +806,8 @@ jobs:
           echo "╔════════════════════════════════════════════════════════════╗"
           echo "║           🎉 Deployment Complete!                           ║"
           echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "📌 Image Version: ${{ steps.set-version.outputs.version }}"
           echo ""
           echo "📡 API Endpoints:"
           echo "   • Swagger UI: http://localhost:8000/docs"
@@ -752,6 +822,95 @@ jobs:
           echo ""
           echo "📊 Container status:"
           docker-compose ps
+
+      - name: Send Discord Notification - Success
+        if: steps.health-check-api.outputs.healthy == 'true' && steps.health-check-dashboard.outputs.healthy == 'true'
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d '{
+                 "embeds": [{
+                   "title": "🏀 Sports Ball Classification - Deployment Successful!",
+                   "color": 5763719,
+                   "fields": [
+                     {
+                       "name": "📌 Version",
+                       "value": "`${{ steps.set-version.outputs.version }}`",
+                       "inline": true
+                     },
+                     {
+                       "name": "🔗 Commit",
+                       "value": "`${{ github.sha }}`",
+                       "inline": true
+                     },
+                     {
+                       "name": "🏥 Health Status",
+                       "value": "✅ API: Healthy\n✅ Dashboard: Healthy",
+                       "inline": false
+                     },
+                     {
+                       "name": "🧪 Test Prediction",
+                       "value": "Predicted: **${{ steps.test-prediction.outputs.prediction_label }}** (${{ steps.test-prediction.outputs.prediction_confidence }}% confidence)",
+                       "inline": false
+                     },
+                     {
+                       "name": "📡 Endpoints",
+                       "value": "• API Docs: http://localhost:8000/docs\n• Dashboard: http://localhost:8501",
+                       "inline": false
+                     }
+                   ],
+                   "footer": {
+                     "text": "Triggered by ${{ github.actor }} • Run #${{ github.run_number }}"
+                   },
+                   "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+                 }]
+               }' \
+               ${{ env.DISCORD_WEBHOOK }}
+          echo "✅ Discord notification sent!"
+
+      - name: Send Discord Notification - Failure
+        if: steps.health-check-api.outputs.healthy != 'true' || steps.health-check-dashboard.outputs.healthy != 'true'
+        run: |
+          API_STATUS="${{ steps.health-check-api.outputs.healthy == 'true' && '✅ Healthy' || '❌ Failed' }}"
+          DASHBOARD_STATUS="${{ steps.health-check-dashboard.outputs.healthy == 'true' && '✅ Healthy' || '❌ Failed' }}"
+
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d '{
+                 "embeds": [{
+                   "title": "🚨 Sports Ball Classification - Deployment Failed!",
+                   "color": 15548997,
+                   "fields": [
+                     {
+                       "name": "📌 Version",
+                       "value": "`${{ steps.set-version.outputs.version }}`",
+                       "inline": true
+                     },
+                     {
+                       "name": "🔗 Commit",
+                       "value": "`${{ github.sha }}`",
+                       "inline": true
+                     },
+                     {
+                       "name": "🏥 Health Status",
+                       "value": "API: '"$API_STATUS"'\nDashboard: '"$DASHBOARD_STATUS"'",
+                       "inline": false
+                     },
+                     {
+                       "name": "⚠️ Action Required",
+                       "value": "Check the [GitHub Actions logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.",
+                       "inline": false
+                     }
+                   ],
+                   "footer": {
+                     "text": "Triggered by ${{ github.actor }} • Run #${{ github.run_number }}"
+                   },
+                   "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+                 }]
+               }' \
+               ${{ env.DISCORD_WEBHOOK }}
+          echo "⚠️ Discord failure notification sent!"
+          exit 1
 
   # ============================================================================
   # Cleanup Azure Resources
@@ -813,6 +972,56 @@ jobs:
             echo ""
           fi
 
+          if [ "${{ needs.deploy-inference.outputs.image_version }}" != "" ]; then
+            echo "🐳 Docker Image Version: ${{ needs.deploy-inference.outputs.image_version }}"
+            echo ""
+          fi
+
           echo "🔗 Azure ML Studio: https://ml.azure.com"
           echo "📡 Local API: http://localhost:8000/docs"
           echo ""
+
+      - name: Send Discord Summary Notification
+        if: always()
+        run: |
+          # Determine overall status
+          if [ "${{ needs.deploy-inference.result }}" == "success" ]; then
+            COLOR=5763719
+            TITLE="✅ Pipeline Completed Successfully!"
+            STATUS_EMOJI="🎉"
+          elif [ "${{ needs.deploy-inference.result }}" == "skipped" ]; then
+            COLOR=16776960
+            TITLE="⏭️ Pipeline Completed (Deployment Skipped)"
+            STATUS_EMOJI="ℹ️"
+          else
+            COLOR=15548997
+            TITLE="❌ Pipeline Failed"
+            STATUS_EMOJI="🚨"
+          fi
+
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d '{
+                 "embeds": [{
+                   "title": "🏀 '"$TITLE"'",
+                   "color": '"$COLOR"',
+                   "fields": [
+                     {
+                       "name": "📊 Pipeline Stages",
+                       "value": "0️⃣ Permissions: `${{ needs.configure-permissions.result || 'skipped' }}`\n1️⃣ Azure Setup: `${{ needs.setup-azure.result || 'skipped' }}`\n2️⃣ Training: `${{ needs.train-model.result || 'skipped' }}`\n3️⃣ Download: `${{ needs.download-model.result || 'skipped' }}`\n4️⃣ Deployment: `${{ needs.deploy-inference.result || 'skipped' }}`",
+                       "inline": false
+                     },
+                     {
+                       "name": "🔗 Links",
+                       "value": "[GitHub Actions Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) • [Azure ML Studio](https://ml.azure.com)",
+                       "inline": false
+                     }
+                   ],
+                   "footer": {
+                     "text": "Run #${{ github.run_number }} • Triggered by ${{ github.actor }}"
+                   },
+                   "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+                 }]
+               }' \
+               ${{ env.DISCORD_WEBHOOK }}
+          echo "✅ Discord summary notification sent!"
